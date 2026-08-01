@@ -5,16 +5,18 @@
 
 ## Build
 
-Make sure you have [Rust](https://www.rust-lang.org/tools/install) installed.
+1. Make sure you have [Rust](https://www.rust-lang.org/tools/install) installed.
+
+2. Build the `rsgridsynth` binary with the `cli` feature.
 
 ```bash
-cargo build --release
+cargo build --bin rsgridsynth -F cli --release
 ```
 
-The binary will be at:
+3. Run `rsgridsynth`.
 
-```
-target/release/rsgridsynth
+```bash
+./target/release/rsgridsynth
 ```
 
 ## Usage
