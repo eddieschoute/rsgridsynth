@@ -95,6 +95,7 @@ mod tests {
     use dashu_float::FBig;
     use dashu_int::ops::Abs;
     use rand::Rng;
+    use serial_test::serial;
     use std::f64::consts::PI as PI_F64;
 
     fn to_fbig(x: f64) -> FBig<HalfEven> {
@@ -116,7 +117,24 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_sin_fbig_random() {
+        // This test asserts against a fixed bit-tolerance regardless of the crate's current
+        // global working precision (`PREC_BITS`), so it must not run concurrently with (via
+        // `#[serial]`) or inherit a stale reduced precision left behind by (via
+        // `reset_prec_bits()`) another test that mutates it -- e.g. a low-epsilon synthesis
+        // test can drive precision down to as little as 16 bits, which would make this test
+        // fail spuriously despite `sin_fbig` being correct at that precision.
+        //
+        // The tolerance itself must also stay safely below the *reference*'s own precision:
+        // `expected` is `x_f64.sin()`, an f64 (~53 bits of mantissa) computed by the
+        // platform's libm, which is typically only guaranteed correctly-rounded to within
+        // ~1 ULP, not exactly-rounded -- so comparing against it at 50 bits (only ~3 bits of
+        // margin below f64's own precision) occasionally fails from ordinary libm rounding
+        // noise over enough random trials, with no connection to PREC_BITS at all. 40 bits
+        // leaves a comfortable margin while still being a far stricter tolerance (~1 part in
+        // 10^12) than any practical use of `sin_fbig` needs.
+        reset_prec_bits();
         let mut rng = rand::rng();
         for _ in 0..100 {
             let x_f64 = rng.random_range(-10.0 * PI_F64..=10.0 * PI_F64);
@@ -124,7 +142,7 @@ mod tests {
             let expected = to_fbig(x_f64.sin());
             let result = sin_fbig(&x);
             assert!(
-                approx_eq(&result, &expected, 50),
+                approx_eq(&result, &expected, 40),
                 "sin({}) = {}, expected {}, diff = {}",
                 x_f64,
                 result,
@@ -135,7 +153,11 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_cos_fbig_random() {
+        // See test_sin_fbig_random's comment: same reset/serialization and tolerance-margin
+        // reasoning applies here.
+        reset_prec_bits();
         let mut rng = rand::rng();
         for _ in 0..100 {
             let x_f64 = rng.random_range(-10.0 * PI_F64..=10.0 * PI_F64);
@@ -143,7 +165,7 @@ mod tests {
             let expected = to_fbig(x_f64.cos());
             let result = cos_fbig(&x);
             assert!(
-                approx_eq(&result, &expected, 50),
+                approx_eq(&result, &expected, 40),
                 "cos({}) = {}, expected {}, diff = {}",
                 x_f64,
                 result,
