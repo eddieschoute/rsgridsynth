@@ -11,13 +11,14 @@
 //! rotation errors cancel exactly, at roughly half the T-count of the plain single-candidate
 //! ("diagonal") protocol for the same diamond-norm accuracy.
 
+use crate::accuracy::{diagonal_diamond_distance, AchievedDiamondError, WFrame};
 use crate::common::{cos_fbig, fb_with_prec, get_prec_bits, ib_to_bf_prec, sin_fbig};
 use crate::config::{config_from_theta_epsilon, GridSynthConfig};
 use crate::diophantine::diophantine_dyadic;
 use crate::gridsynth::{process_solution_candidate, setup_regions_and_transform, PhaseMode};
 use crate::gridsynth::{UnitDisk, UprightTransform};
 use crate::math::{solve_quadratic, sqrt_fbig};
-use crate::protocol::mixing::{diamond_to_spec_epsilon, mixture_weight, WFrame};
+use crate::protocol::mixing::{diamond_to_spec_epsilon, mixture_weight};
 use crate::region::Ellipse;
 use crate::ring::{DOmega, DRootTwo, ZRootTwo};
 use crate::synthesis_of_clifford_t::decompose_domega_unitary;
@@ -108,7 +109,13 @@ impl MixedDiagonalRegion {
         let one = ib_to_bf_prec(IBig::ONE);
         let zero = ib_to_bf_prec(IBig::ZERO);
         let half_eps = fb_with_prec(epsilon / &two);
-        let one_minus_half_eps = fb_with_prec(&one - &half_eps);
+        // `epsilon` >= 2 (e.g. a derived, rescaled correction-step epsilon on a
+        // near-degenerate candidate, as in `mixed_fallback::build_side`) is already past the
+        // point where any point of the disk fails to qualify; the sane mathematical limit of
+        // the formula below is `one_minus_half_eps = 0`, not a negative radicand. Clamp
+        // rather than let that panic in `sqrt_fbig`, matching the analogous clamp in
+        // `gridsynth::EpsilonRegion::from_target_direction_impl`.
+        let one_minus_half_eps = fb_with_prec(&one - &half_eps).max(zero.clone());
         let scale_to_real = scale.to_real();
 
         // Exact offset, radial semi-axis, and tangential semi-axis -- see struct docs.
@@ -345,12 +352,63 @@ pub struct MixedDiagonalBranch {
 
 /// The output of [`synth_mixed_diagonal`]: a classical mixture of Clifford+T circuits
 /// (`branches`, with weights summing to 1) implementing a probabilistic-channel
-/// approximation of `R_z(theta)`, together with the achieved projective-step diamond-norm
-/// error (`0` for the degenerate exact-angle case).
+/// approximation of `R_z(theta)`. Call [`AchievedDiamondError::achieved_diamond_error`] to
+/// compute the achieved projective-step diamond-norm error on demand.
 #[derive(Debug, Clone)]
 pub struct MixedDiagonalResult {
     pub branches: Vec<MixedDiagonalBranch>,
-    pub projective_diamond_error: FBig<HalfEven>,
+}
+
+impl MixedDiagonalResult {
+    /// Recomputes the achieved diamond-norm error to the target direction encoded by `wframe`,
+    /// directly from the public `branches`, decoding each gate string back into a unitary.
+    /// [`AchievedDiamondError::achieved_diamond_error`] is a thin wrapper over this that builds
+    /// `wframe` from a raw `theta` via [`WFrame::new`] -- this lower-level entry point exists
+    /// so a caller that already has a target direction as a `(cos, sin)` half-angle pair (e.g.
+    /// a fallback correction's residual angle) can reuse the exact same mixture-aware
+    /// computation without a lossy angle round-trip.
+    ///
+    /// For the single-branch (exact-angle) case this decodes that one candidate and computes
+    /// its diamond distance directly. For the general (8-twirled-branch) case:
+    /// [`twirl_variants`] only ever rotates a candidate's `w`, never its `z`, so every branch
+    /// within the `lo` family (the first half) and within the `hi` family (the second half)
+    /// shares the same `z` and hence the same `Re(w)`/`Im(w)`. This decodes one representative
+    /// from each family and reapplies [`mixture_weight`]'s closed form -- naively
+    /// triangle-inequality-summing the distance of all 8 individual branches (an earlier,
+    /// wrong version of this crate's `mixed_fallback` correction accuracy check made exactly
+    /// this mistake) would throw away the quadratic cancellation the mixture achieves, since
+    /// each *individual* branch is only as close to the target as the (much looser)
+    /// straddling-search tolerance, not the mixture's own tighter budget.
+    pub(crate) fn achieved_diamond_error_with_frame(&self, wframe: &WFrame) -> FBig<HalfEven> {
+        if self.branches.len() == 1 {
+            let u = DOmegaUnitary::from_gates(&self.branches[0].gates);
+            let re_w = wframe.re_w(u.z());
+            return diagonal_diamond_distance(&re_w);
+        }
+        assert_eq!(
+            self.branches.len() % 2,
+            0,
+            "a mixed result's branches must split evenly into lo/hi twirl families"
+        );
+        let half = self.branches.len() / 2;
+
+        let lo_u = DOmegaUnitary::from_gates(&self.branches[0].gates);
+        let hi_u = DOmegaUnitary::from_gates(&self.branches[half].gates);
+        let re_lo = wframe.re_w(lo_u.z());
+        let im_lo = wframe.im_w(lo_u.z());
+        let re_hi = wframe.re_w(hi_u.z());
+        let im_hi = wframe.im_w(hi_u.z());
+
+        mixture_weight((&re_lo, &im_lo), (&re_hi, &im_hi))
+            .expect("a real assembled Mixed result must yield a valid mixture")
+            .projective_diamond_error
+    }
+}
+
+impl AchievedDiamondError for MixedDiagonalResult {
+    fn achieved_diamond_error(&self, theta: &FBig<HalfEven>) -> FBig<HalfEven> {
+        self.achieved_diamond_error_with_frame(&WFrame::new(theta))
+    }
 }
 
 /// Turns a [`StraddleOutcome`] into the final weighted branch list.
@@ -377,7 +435,6 @@ pub(crate) fn assemble_result(outcome: StraddleOutcome, wframe: &WFrame) -> Mixe
                     gates,
                     weight: ib_to_bf_prec(IBig::ONE),
                 }],
-                projective_diamond_error: ib_to_bf_prec(IBig::ZERO),
             }
         }
         StraddleOutcome::Mixed(lo, hi) => {
@@ -413,10 +470,7 @@ pub(crate) fn assemble_result(outcome: StraddleOutcome, wframe: &WFrame) -> Mixe
                 });
             }
 
-            MixedDiagonalResult {
-                branches,
-                projective_diamond_error: mw.projective_diamond_error,
-            }
+            MixedDiagonalResult { branches }
         }
     }
 }
@@ -822,7 +876,20 @@ mod tests {
                 &ib_to_bf_prec(IBig::ONE),
                 safe_tol_bits()
             ));
-            assert_eq!(result.projective_diamond_error, ib_to_bf_prec(IBig::ZERO));
+            // `achieved_diamond_error` is computed via `WFrame::re_w`/`diagonal_diamond_distance`,
+            // which mixes two independently-rounded floating trig approximations
+            // (`cos_fbig`/`sin_fbig`) that do not cancel to bit-exact zero even when the true
+            // rotation error is exactly zero (same caveat this module already documents for
+            // `im_w`) -- so this must be an approximate, not exact, equality check.
+            // `diagonal_diamond_distance`'s `sqrt` roughly halves the number of reliable bits
+            // (a `re_w` deviation of `d` near 1 becomes an error of order `sqrt(d)`), so the
+            // usual `safe_tol_bits()` is too tight here.
+            let theta = to_fbig(theta_f64);
+            assert!(approx_eq(
+                &result.achieved_diamond_error(&theta),
+                &ib_to_bf_prec(IBig::ZERO),
+                safe_tol_bits() / 2
+            ));
         }
     }
 

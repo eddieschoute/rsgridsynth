@@ -7,9 +7,11 @@
 //! of the committed test suite.
 
 use rsgridsynth::clear_caches;
+use rsgridsynth::config::config_from_theta_epsilon;
 use rsgridsynth::protocol::fallback::exact_q;
 use rsgridsynth::protocol::{
-    synth_fallback, synth_mixed_diagonal, synth_mixed_fallback, FallbackResult, MixedFallbackResult,
+    synth_fallback, synth_mixed_diagonal, synth_mixed_fallback, AchievedDiamondError,
+    MixedFallbackResult,
 };
 
 fn fbig_to_f64(x: &dashu_float::FBig<dashu_float::round::mode::HalfEven>) -> f64 {
@@ -40,6 +42,7 @@ fn main() {
     for &eps in &epsilons {
         for (i, &theta) in thetas.iter().enumerate() {
             let seed = 1000 + i as u64;
+            let theta_fbig = config_from_theta_epsilon(theta, eps, seed, false, false).theta;
 
             clear_caches();
             let md = synth_mixed_diagonal(theta, eps, seed, false);
@@ -49,20 +52,16 @@ fn main() {
             }
             println!(
                 "mixed_diagonal,{theta},{eps},{cost},{},",
-                fbig_to_f64(&md.projective_diamond_error)
+                fbig_to_f64(&md.achieved_diamond_error(&theta_fbig))
             );
 
             clear_caches();
             let sin_alpha = eps / 4.0; // matches fallback.rs's own slope-fit test convention
             match synth_fallback(theta, eps, q.clone(), sin_alpha, seed, false) {
-                Some(FallbackResult {
-                    projective_gates,
-                    correction_gates,
-                    success_probability,
-                    ..
-                }) => {
-                    let p = fbig_to_f64(&success_probability);
-                    let cost = t_count(&projective_gates) + (1.0 - p) * t_count(&correction_gates);
+                Some(result) => {
+                    let p = fbig_to_f64(&result.achieved_success_probability());
+                    let cost = t_count(&result.projective_gates)
+                        + (1.0 - p) * t_count(&result.correction_gates);
                     println!("fallback,{theta},{eps},{cost},,{p}");
                 }
                 None => println!("fallback,{theta},{eps},ERROR,NotFound,"),
@@ -76,7 +75,7 @@ fn main() {
                 Some(MixedFallbackResult::Mixed { lo, hi, p, .. }) => {
                     let p_f64 = fbig_to_f64(&p);
                     let side_cost = |s: &rsgridsynth::protocol::MixedFallbackSide| {
-                        let p_success = fbig_to_f64(&s.success_probability);
+                        let p_success = fbig_to_f64(&s.achieved_success_probability());
                         let mut corr_cost = 0.0;
                         for b in &s.correction.branches {
                             corr_cost += fbig_to_f64(&b.weight) * t_count(&b.gates);

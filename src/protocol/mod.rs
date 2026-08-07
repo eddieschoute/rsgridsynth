@@ -6,9 +6,10 @@ pub mod mixed_diagonal;
 pub mod mixed_fallback;
 pub mod mixing;
 
+pub use crate::accuracy::AchievedDiamondError;
 pub use mixing::{
-    diagonal_diamond_distance, diamond_to_spec_epsilon, mixture_weight, pauli_diamond_distance,
-    MixtureWeight, WFrame,
+    achieved_diagonal_diamond_error, diagonal_diamond_distance, diamond_to_spec_epsilon,
+    mixture_weight, pauli_diamond_distance, MixtureWeight, WFrame,
 };
 
 pub use mixed_diagonal::{

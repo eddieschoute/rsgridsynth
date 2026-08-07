@@ -477,7 +477,7 @@ fn mixed_diagonal_pauli_branches(result: &MixedDiagonalResult) -> Vec<(Fb, M2)> 
 /// `q * single_rotation_distance(z, theta) + (1-q) * pauli_distance(B, theta - Arg(v))`.
 /// Returns `(bound, correction_off_diagonal_diagnostic)`.
 fn fallback_upper_bound(result: &FallbackResult, z: &Cx, v: &Cx, theta: &Fb) -> (Fb, Fb) {
-    let q = result.success_probability.clone();
+    let q = result.achieved_success_probability();
     let success_term = single_rotation_diamond_distance(z, theta);
 
     let (cos_res, sin_res) = residual_cos_sin(theta, v);
@@ -525,8 +525,8 @@ fn mixed_fallback_total_bound(
     p: &Fb,
     theta: &Fb,
 ) -> (Fb, Fb) {
-    let q_lo = lo.side.success_probability.clone();
-    let q_hi = hi.side.success_probability.clone();
+    let q_lo = lo.side.achieved_success_probability();
+    let q_hi = hi.side.achieved_success_probability();
     let one_minus_p = fsub(&fone(), p);
 
     let phase_sq_lo = phase_sq_from_z(&lo.z);

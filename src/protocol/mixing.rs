@@ -13,69 +13,17 @@
 //! evaluation) that a later stage will use to actually build those protocols. It does not
 //! itself implement the mixed-diagonal or mixed-fallback region/synthesis logic.
 
-use crate::common::{cos_fbig, fb_with_prec, ib_to_bf_prec, sin_fbig};
-use crate::math::sqrt_fbig;
-use crate::ring::DOmega;
+use crate::common::{fb_with_prec, ib_to_bf_prec};
 use dashu_float::round::mode::HalfEven;
 use dashu_float::FBig;
 use dashu_int::ops::Abs;
 use dashu_int::IBig;
 
-/// The rotated-frame projection used to measure rotation error against a target angle
-/// `theta`. Given a candidate unitary's top-left entry `u`, defines
-/// `w := u * e^{i theta/2}`, i.e. `u` rotated so that the target direction `e^{-i theta/2}`
-/// maps to `1`. `Re(w)` is exactly the `cos_similarity` quantity computed inline (and
-/// duplicated) inside [`crate::gridsynth::EpsilonRegion::inside`]/`intersect`; this type
-/// factors that arithmetic out.
-///
-/// Derivation: with `z := z_x + i*z_y = e^{-i theta/2}` (as `EpsilonRegion::new` computes),
-/// `e^{i theta/2} = conj(z) = z_x - i*z_y`. So
-/// `w = (z_x - i*z_y) * (Re(u) + i*Im(u))
-///    = [z_x*Re(u) + z_y*Im(u)] + i*[z_x*Im(u) - z_y*Re(u)]`.
-/// Hence `Re(w) = z_x*Re(u) + z_y*Im(u)` and `Im(w) = z_x*Im(u) - z_y*Re(u)`.
-#[derive(Debug, Clone)]
-pub struct WFrame {
-    z_x: FBig<HalfEven>,
-    z_y: FBig<HalfEven>,
-}
-
-impl WFrame {
-    /// Builds the rotated frame for target angle `theta`, computing `z_x = cos(-theta/2)`,
-    /// `z_y = sin(-theta/2)` exactly as `EpsilonRegion::new` does.
-    pub fn new(theta: &FBig<HalfEven>) -> Self {
-        let two = fb_with_prec(FBig::try_from(2.0).unwrap());
-        let theta_half = fb_with_prec(theta / &two);
-        let neg_theta_half = -fb_with_prec(theta_half);
-        let z_x: FBig<HalfEven> = fb_with_prec(cos_fbig(&neg_theta_half));
-        let z_y: FBig<HalfEven> = fb_with_prec(sin_fbig(&neg_theta_half));
-        Self { z_x, z_y }
-    }
-
-    /// Builds the same frame as [`WFrame::new`], but from the target direction's half-angle
-    /// `(cos(-phi/2), sin(-phi/2))` directly, for a caller that already has that pair from
-    /// algebraic angle-addition/half-angle identities (e.g. a fallback correction's residual
-    /// angle) rather than a raw angle -- avoiding an `atan2`-style angle round-trip, mirroring
-    /// [`crate::gridsynth::EpsilonRegion::from_target_direction`]. `(z_x, z_y)` must satisfy
-    /// `z_x^2 + z_y^2 == 1`; not checked.
-    pub(crate) fn from_target_direction(z_x: FBig<HalfEven>, z_y: FBig<HalfEven>) -> Self {
-        Self { z_x, z_y }
-    }
-
-    /// `Re(w)` where `w = u * e^{i theta/2}`. Matches `EpsilonRegion`'s existing
-    /// `cos_similarity` exactly (same formula, same operand order).
-    pub fn re_w(&self, u: &DOmega) -> FBig<HalfEven> {
-        let term1 = fb_with_prec(&self.z_x * u.real());
-        let term2 = fb_with_prec(&self.z_y * u.imag());
-        fb_with_prec(&term1 + &term2)
-    }
-
-    /// `Im(w)` where `w = u * e^{i theta/2}`.
-    pub fn im_w(&self, u: &DOmega) -> FBig<HalfEven> {
-        let term1 = fb_with_prec(&self.z_x * u.imag());
-        let term2 = fb_with_prec(&self.z_y * u.real());
-        fb_with_prec(&term1 - &term2)
-    }
-}
+// `WFrame` and `diagonal_diamond_distance` live in `crate::accuracy` now (shared by both this
+// protocol module and the plain single-candidate synthesis path in `crate::gridsynth`), but
+// re-exported here since every existing internal call site in `protocol/*.rs` refers to them
+// as `crate::protocol::mixing::{WFrame, diagonal_diamond_distance}`.
+pub use crate::accuracy::{achieved_diagonal_diamond_error, diagonal_diamond_distance, WFrame};
 
 /// The result of [`mixture_weight`]: the classical mixing probability `p` and the
 /// resulting projective-step diamond-norm error achieved by mixing.
@@ -183,21 +131,6 @@ pub fn mixture_weight(
     })
 }
 
-/// Exact diamond-norm distance between a target Z-rotation and its diagonal-unitary
-/// approximation, given only the achieved `Re(w)` (`w = u * e^{i theta/2}`, see
-/// [`WFrame::re_w`]): `||Z_phi - U||_diamond = 2*sqrt(1 - Re(w)^2)`.
-pub fn diagonal_diamond_distance(re_w: &FBig<HalfEven>) -> FBig<HalfEven> {
-    let one = ib_to_bf_prec(IBig::ONE);
-    let re_w_sq = fb_with_prec(re_w * re_w);
-    let one_minus_re_w_sq = fb_with_prec(&one - &re_w_sq);
-    // Guard against tiny negative values from rounding error, matching the analogous
-    // clamp in `gridsynth::compute_error`.
-    let zero = ib_to_bf_prec(IBig::ZERO);
-    let clamped = one_minus_re_w_sq.max(zero);
-    let two = fb_with_prec(FBig::try_from(2.0).unwrap());
-    fb_with_prec(&two * sqrt_fbig(&clamped))
-}
-
 /// General Pauli-channel diamond-norm closed form: `||E1 - E2||_diamond = sum_P |q_P -
 /// r_P|` over the four Pauli components `(I, X, Y, Z)`. Kept generic/simple for a future
 /// stage's mixed-diagonal Pauli-channel error computation.
@@ -229,9 +162,10 @@ pub fn diamond_to_spec_epsilon(eps_diamond: &FBig<HalfEven>) -> FBig<HalfEven> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::reset_prec_bits;
+    use crate::common::{cos_fbig, reset_prec_bits, sin_fbig};
     use crate::gridsynth::EpsilonRegion;
-    use crate::ring::{ZOmega, ZRootTwo};
+    use crate::math::sqrt_fbig;
+    use crate::ring::{DOmega, ZOmega, ZRootTwo};
     use crate::tdgp::Region;
     use serial_test::serial;
 

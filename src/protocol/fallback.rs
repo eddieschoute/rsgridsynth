@@ -20,6 +20,9 @@
 //! logic. [`crate::gridsynth::search_for_solution`] (already generic over any `Region`) is
 //! reused unchanged.
 
+use crate::accuracy::{
+    achieved_phase_diamond_error, diagonal_diamond_distance, AchievedDiamondError, WFrame,
+};
 use crate::common::{cos_fbig, fb_with_prec, ib_to_bf_prec, sin_fbig};
 use crate::config::config_from_theta_epsilon;
 use crate::gridsynth::{
@@ -31,6 +34,7 @@ use crate::region::Ellipse;
 use crate::ring::{DOmega, DRootTwo, ZRootTwo};
 use crate::synthesis_of_clifford_t::decompose_domega_unitary;
 use crate::tdgp::Region;
+use crate::unitary::DOmegaUnitary;
 
 use dashu_float::round::mode::HalfEven;
 use dashu_float::FBig;
@@ -337,8 +341,12 @@ pub(crate) fn half_angle_cos_sin(
 
     let one = ib_to_bf_prec(IBig::ONE);
     let two = to_fbig(2.0);
-    let one_plus_cos = fb_with_prec(&one + cos_phi);
-    let one_minus_cos = fb_with_prec(&one - cos_phi);
+    // `cos_phi` is a ratio of low-precision `FBig` values (see callers), so it can round to
+    // just outside `[-1, 1]`; guard against the resulting tiny negative `sqrt_fbig` input,
+    // matching the analogous clamp in `gridsynth::compute_error`/`mixing::diagonal_diamond_distance`.
+    let zero = ib_to_bf_prec(IBig::ZERO);
+    let one_plus_cos = fb_with_prec(&one + cos_phi).max(zero.clone());
+    let one_minus_cos = fb_with_prec(&one - cos_phi).max(zero);
     let cos_half = sqrt_fbig(&fb_with_prec(&one_plus_cos / &two));
     let sin_half_mag = sqrt_fbig(&fb_with_prec(&one_minus_cos / &two));
 
@@ -352,17 +360,128 @@ pub(crate) fn half_angle_cos_sin(
 }
 
 /// The output of [`synth_fallback`]: gate strings for the projective step and its (rare)
-/// classical correction, plus the achieved success probability and the `q` threshold used.
+/// classical correction, plus the `q` threshold used. Call
+/// [`FallbackResult::achieved_success_probability`] or
+/// [`AchievedDiamondError::achieved_diamond_error`] to compute accuracy on demand.
 pub struct FallbackResult {
     /// Gate string for the projective/fallback step, applied unconditionally.
     pub projective_gates: String,
     /// Gate string for the classical correction, applied only on the "failure" branch
-    /// (probability `1 - success_probability`).
+    /// (probability `1 - achieved_success_probability()`).
     pub correction_gates: String,
-    /// The ACHIEVED `|z|^2` of the solved projective candidate (not the `q` floor).
-    pub success_probability: FBig<HalfEven>,
     /// The `q` threshold used to find the projective candidate.
     pub q: DRootTwo,
+}
+
+impl FallbackResult {
+    /// Recomputes the achieved success probability directly from the returned
+    /// `projective_gates` string (decoding it back into a unitary and taking its top-left
+    /// entry's squared magnitude).
+    pub fn achieved_success_probability(&self) -> FBig<HalfEven> {
+        let u = DOmegaUnitary::from_gates(&self.projective_gates);
+        let z = u.z();
+        fb_with_prec(fb_with_prec(z.real() * z.real()) + fb_with_prec(z.imag() * z.imag()))
+    }
+}
+
+/// Diamond-norm distance between `correction_gates` and the *residual* target rotation
+/// `theta - Arg(v)` that it actually approximates -- `v` decoded from `projective_gates`'s own
+/// off-diagonal (`w`) entry, per the same `atan2`-free half-angle algebra
+/// [`synth_fallback`]/[`crate::protocol::mixed_fallback::build_side`] use to derive that
+/// residual angle in the first place. NOT `theta` itself, and NOT composed with the
+/// projective step: the correction is a standalone approximation of the residual angle (see
+/// this module's doc comment on why the projective/failure split works the way it does), so
+/// its own accuracy has to be measured against that residual, decoded here purely from the
+/// public `projective_gates` string rather than any transient search state.
+/// Builds the [`WFrame`] for the *residual* target rotation `theta - Arg(v)` that a
+/// projective step's correction actually approximates -- `v` decoded from `projective_gates`'s
+/// own off-diagonal (`w`) entry, via the same `atan2`-free half-angle algebra
+/// [`synth_fallback`]/[`crate::protocol::mixed_fallback::build_side`] use to derive that
+/// residual angle in the first place. Shared by [`residual_diamond_error`] (a single
+/// correction gate string) and [`residual_diamond_error_mixed`] (a `MixedDiagonalResult`
+/// correction, e.g. mixed fallback's).
+pub(crate) fn residual_wframe(theta: &FBig<HalfEven>, projective_gates: &str) -> WFrame {
+    let v = DOmegaUnitary::from_gates(projective_gates).w().clone();
+    let re_v = v.real().clone();
+    let im_v = v.imag().clone();
+    let v_norm_sq = fb_with_prec(fb_with_prec(&re_v * &re_v) + fb_with_prec(&im_v * &im_v));
+    let v_norm = sqrt_fbig(&v_norm_sq);
+    let cos_phi = fb_with_prec(&re_v / &v_norm);
+    let sin_phi = fb_with_prec(&im_v / &v_norm);
+    let (cos_half_phi, sin_half_phi) = half_angle_cos_sin(&cos_phi, &sin_phi);
+
+    let two = to_fbig(2.0);
+    let neg_theta_half = -fb_with_prec(theta / &two);
+    let z_x = fb_with_prec(cos_fbig(&neg_theta_half));
+    let z_y = fb_with_prec(sin_fbig(&neg_theta_half));
+
+    // cos(-theta_B/2) = cos(A+B) = Z_X*cos(phi/2) - Z_Y*sin(phi/2)
+    // sin(-theta_B/2) = sin(A+B) = Z_Y*cos(phi/2) + Z_X*sin(phi/2)
+    let cos_neg_theta_b_half =
+        fb_with_prec(fb_with_prec(&z_x * &cos_half_phi) - fb_with_prec(&z_y * &sin_half_phi));
+    let sin_neg_theta_b_half =
+        fb_with_prec(fb_with_prec(&z_y * &cos_half_phi) + fb_with_prec(&z_x * &sin_half_phi));
+
+    WFrame::from_target_direction(cos_neg_theta_b_half, sin_neg_theta_b_half)
+}
+
+/// Diamond-norm distance between `correction_gates` and the residual target rotation it
+/// actually approximates (see [`residual_wframe`]) -- NOT `theta` itself, and NOT composed
+/// with the projective step: the correction is a standalone approximation of the residual
+/// angle.
+pub(crate) fn residual_diamond_error(
+    theta: &FBig<HalfEven>,
+    projective_gates: &str,
+    correction_gates: &str,
+) -> FBig<HalfEven> {
+    let wframe = residual_wframe(theta, projective_gates);
+    let u = DOmegaUnitary::from_gates(correction_gates);
+    let re_w = wframe.re_w(u.z());
+    diagonal_diamond_distance(&re_w)
+}
+
+/// Like [`residual_diamond_error`], but for a correction that's itself a
+/// [`MixedDiagonalResult`] (mixed fallback's twirled-branch corrections) rather than a single
+/// gate string. Delegates to
+/// [`MixedDiagonalResult::achieved_diamond_error_with_frame`] so the mixture's own quadratic
+/// error cancellation (see that method's docs) is preserved, instead of naively
+/// triangle-inequality-summing each individual branch's (much larger) distance to the
+/// residual target.
+pub(crate) fn residual_diamond_error_mixed(
+    theta: &FBig<HalfEven>,
+    projective_gates: &str,
+    correction: &crate::protocol::mixed_diagonal::MixedDiagonalResult,
+) -> FBig<HalfEven> {
+    let wframe = residual_wframe(theta, projective_gates);
+    correction.achieved_diamond_error_with_frame(&wframe)
+}
+
+impl AchievedDiamondError for FallbackResult {
+    /// Triangle-inequality upper bound on the *whole protocol's* diamond-norm distance to
+    /// `theta`: `p_success * dist_phase(projective, theta) + (1 - p_success) *
+    /// dist(correction, residual target)`, where `p_success` is
+    /// [`FallbackResult::achieved_success_probability`].
+    ///
+    /// The success term compares the projective candidate's *phase* (`z/|z|`) to `theta`, not
+    /// its raw (magnitude-deficient) top-left entry -- see
+    /// [`crate::accuracy::achieved_phase_diamond_error`]'s docs for why that distinction
+    /// matters for this family. The failure term compares `correction_gates` to the residual
+    /// angle it actually approximates (see [`residual_diamond_error`]), not to `theta` and not
+    /// composed with the projective step. This is a valid upper bound (diamond norm is a
+    /// proper norm, and this is a probabilistic mixture of two unitary channels against a
+    /// fixed target), not necessarily the tightest possible one.
+    fn achieved_diamond_error(&self, theta: &FBig<HalfEven>) -> FBig<HalfEven> {
+        let p_success = self.achieved_success_probability();
+        let success_dist = achieved_phase_diamond_error(theta, &self.projective_gates);
+        let failure_dist =
+            residual_diamond_error(theta, &self.projective_gates, &self.correction_gates);
+
+        let one = ib_to_bf_prec(IBig::ONE);
+        let one_minus_p = fb_with_prec(&one - &p_success);
+        fb_with_prec(
+            fb_with_prec(&p_success * &success_dist) + fb_with_prec(&one_minus_p * &failure_dist),
+        )
+    }
 }
 
 /// Synthesizes a fallback (projective) approximation to `R_z(theta)` within diamond-norm
@@ -419,12 +538,8 @@ pub fn synth_fallback(
         None,
     )?;
 
-    let z = projective_unitary.z().clone();
     let v = projective_unitary.w().clone();
     let projective_gates = decompose_domega_unitary(projective_unitary);
-
-    let success_probability =
-        fb_with_prec(fb_with_prec(z.real() * z.real()) + fb_with_prec(z.imag() * z.imag()));
 
     // Correction step: residual angle theta_B = theta - Arg(v), via the half-angle algebra
     // derived in this module's docs (avoids atan2).
@@ -476,7 +591,6 @@ pub fn synth_fallback(
     Some(FallbackResult {
         projective_gates,
         correction_gates,
-        success_probability,
         q,
     })
 }
@@ -486,7 +600,6 @@ mod tests {
     use super::*;
     use crate::common::reset_prec_bits;
     use crate::ring::ZOmega;
-    use crate::unitary::DOmegaUnitary;
     use dashu_base::Abs;
     use serial_test::serial;
     use std::f64::consts::PI;
@@ -653,28 +766,12 @@ mod tests {
             let result = synth_fallback(theta, eps_diamond, q.clone(), sin_alpha, 42, false)
                 .expect("expected a solution within budget");
 
-            // success_probability must meet the region's own guarantee.
+            // achieved_success_probability must meet the region's own guarantee.
             let q_real = result.q.to_real();
+            let achieved = result.achieved_success_probability();
             assert!(
-                result.success_probability >= q_real,
-                "achieved success probability {} is below q floor {}",
-                result.success_probability,
-                q_real
-            );
-
-            // Absolute oracle: re-multiply the projective gate string and confirm its
-            // top-left magnitude-squared matches the achieved success probability.
-            let reconstructed =
-                DOmegaUnitary::from_gates(&result.projective_gates).to_complex_matrix();
-            let top_left = reconstructed[(0, 0)].clone();
-            let magnitude_sq = fb_with_prec(
-                fb_with_prec(&top_left.re * &top_left.re)
-                    + fb_with_prec(&top_left.im * &top_left.im),
-            );
-            assert!(
-                approx_eq(&magnitude_sq, &result.success_probability, 100),
-                "reconstructed |z|^2 = {magnitude_sq}, expected {}",
-                result.success_probability
+                achieved >= q_real,
+                "achieved success probability {achieved} is below q floor {q_real}"
             );
         }
     }
@@ -722,7 +819,7 @@ mod tests {
                     .filter(|&c| c == 'T')
                     .count();
 
-                let p_f64 = match result.success_probability.to_f64() {
+                let p_f64 = match result.achieved_success_probability().to_f64() {
                     dashu_base::Approximation::Exact(v) => v,
                     dashu_base::Approximation::Inexact(v, _) => v,
                 };
