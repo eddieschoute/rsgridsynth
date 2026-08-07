@@ -7,12 +7,32 @@
 //! call either; it only reads final gate strings and probabilities and recomputes everything
 //! from scratch).
 //!
+//! ## Arbitrary precision throughout, not `f64`
+//!
+//! Every quantity in this file -- matrix entries, Pauli transfer matrices, angular
+//! differences -- is computed as `FBig<HalfEven>` at the crate's own working precision
+//! (`rsgridsynth::common::get_prec_bits()`, set by whichever `synth_*` call ran most
+//! recently), never downcast to `f64` until the final printed digits. An earlier version of
+//! this file converted synthesized matrices to `f64` immediately and computed
+//! `2*sqrt(1-Re(w)^2)`: at epsilon ~1e-8 the true angular error can be ~1e-9, at which point
+//! `Re(w)` rounds to exactly `1.0` in `f64` (whose resolution near 1.0 is ~2.2e-16), and
+//! squaring then subtracting from 1 amplified that rounding noise into a *floor* of
+//! `2*sqrt(f64::EPSILON) ~= 3e-8` regardless of the true (much smaller) error -- a spurious
+//! "budget exceeded" false positive that had nothing to do with the actual synthesis. Working
+//! entirely in `FBig` removes that floor (down to whatever precision the crate itself used to
+//! synthesize the candidate), and every angular quantity below is derived algebraically from
+//! ring/complex arithmetic rather than by taking `atan2`/`acos` of an early-rounded `f64` and
+//! re-differencing it (this crate does not implement arbitrary-precision inverse trig at all,
+//! so the derivations below route around ever needing one -- see `phase_sq_from_z` and
+//! `residual_cos_sin`).
+//!
 //! ## Two different, non-interchangeable ways to measure "how far" a channel is from target
 //!
 //! **Single Z-rotation vs. target Z-rotation** (`single_rotation_diamond_distance`): exact,
-//! closed form, `2*sqrt(1-Re(w)^2)`. Always valid for comparing one pure rotation to another.
+//! closed form, `2*|Im(w)|` (equal to `2*sqrt(1-Re(w)^2)` since `w` is unit-modulus, but
+//! numerically stable -- see above). Always valid for comparing one pure rotation to another.
 //!
-//! **Pauli transfer matrix** (`ptm`/`pauli_diamond_distance_from_branches`): computes
+//! **Pauli transfer matrix** (`ptm`/`pauli_diamond_distance_from_target`): computes
 //! `Sum_P |delta_q_P|` from a channel's Pauli-basis decomposition. This closed form is only
 //! mathematically valid when the *difference* between the channel and the target is itself
 //! diagonal in the Pauli basis -- true for mixed diagonal's output (the {Z,S} twirl exists
@@ -48,9 +68,13 @@
 //! budget, it does not by itself prove a failure (the true distance could still be smaller),
 //! but it does mean this check cannot certify a pass and warrants a tighter look.
 
-use dashu_base::Approximation;
-use num::Complex;
+use dashu_base::{Abs, Approximation};
+use dashu_float::round::mode::HalfEven;
+use dashu_float::FBig;
+use dashu_int::IBig;
 use rsgridsynth::clear_caches;
+use rsgridsynth::common::{cos_fbig, fb_with_prec, ib_to_bf_prec, sin_fbig};
+use rsgridsynth::math::{sign, sqrt_fbig};
 use rsgridsynth::protocol::fallback::exact_q;
 use rsgridsynth::protocol::{
     synth_fallback, synth_mixed_diagonal, synth_mixed_fallback, FallbackResult,
@@ -58,37 +82,142 @@ use rsgridsynth::protocol::{
 };
 use rsgridsynth::unitary::DOmegaUnitary;
 
-type C = Complex<f64>;
-type M2 = [[C; 2]; 2];
+type Fb = FBig<HalfEven>;
 
-fn to_f64(x: &dashu_float::FBig<dashu_float::round::mode::HalfEven>) -> f64 {
+/// Converts an `f64` to `Fb` the same way `config_from_theta_epsilon` converts its `theta`/
+/// `epsilon` parameters: by parsing the **decimal string** representation (`x.to_string()`)
+/// as an exact fraction, via `rsgridsynth::config::parse_decimal_with_exponent`. This must
+/// match exactly, not just approximately -- `FBig::try_from(f64)` instead would give the
+/// f64's exact *binary* value (e.g. `4.2_f64` is really
+/// `4.20000000000000017763568...`), which differs from the crate's own "4.2" target by
+/// ~1.8e-16. That is far smaller than any epsilon this file tested before, but at
+/// epsilon=1e-15 it is comparable to the budget itself, and shows up as a spurious ~35x
+/// "budget exceeded" on `mixed_fallback` at theta=4.2 that had nothing to do with the
+/// synthesized channel -- purely an artifact of this file targeting a very slightly
+/// different angle than the crate actually solved for.
+fn to_fbig(x: f64) -> Fb {
+    let (num, den) = rsgridsynth::config::parse_decimal_with_exponent(&x.to_string()).unwrap();
+    fdiv(&ib_to_bf_prec(num), &ib_to_bf_prec(den))
+}
+
+fn to_f64(x: &Fb) -> f64 {
     match x.to_f64() {
         Approximation::Exact(v) => v,
         Approximation::Inexact(v, _) => v,
     }
 }
 
+fn fzero() -> Fb {
+    ib_to_bf_prec(IBig::ZERO)
+}
+
+fn fone() -> Fb {
+    ib_to_bf_prec(IBig::ONE)
+}
+
+fn fadd(a: &Fb, b: &Fb) -> Fb {
+    fb_with_prec(a + b)
+}
+
+fn fsub(a: &Fb, b: &Fb) -> Fb {
+    fb_with_prec(a - b)
+}
+
+fn fmul(a: &Fb, b: &Fb) -> Fb {
+    fb_with_prec(a * b)
+}
+
+fn fdiv(a: &Fb, b: &Fb) -> Fb {
+    fb_with_prec(a / b)
+}
+
+fn fneg(a: &Fb) -> Fb {
+    -fb_with_prec(a.clone())
+}
+
+/// Arbitrary-precision complex number, replacing `num::Complex<f64>` for every quantity that
+/// feeds into a pass/fail budget decision (see module docs).
+#[derive(Clone)]
+struct Cx {
+    re: Fb,
+    im: Fb,
+}
+
+impl Cx {
+    fn new(re: Fb, im: Fb) -> Self {
+        Self { re, im }
+    }
+
+    fn zero() -> Self {
+        Self::new(fzero(), fzero())
+    }
+
+    fn real(x: Fb) -> Self {
+        Self::new(x, fzero())
+    }
+
+    fn add(&self, o: &Cx) -> Cx {
+        Cx::new(fadd(&self.re, &o.re), fadd(&self.im, &o.im))
+    }
+
+    fn sub(&self, o: &Cx) -> Cx {
+        Cx::new(fsub(&self.re, &o.re), fsub(&self.im, &o.im))
+    }
+
+    fn mul(&self, o: &Cx) -> Cx {
+        let re = fsub(&fmul(&self.re, &o.re), &fmul(&self.im, &o.im));
+        let im = fadd(&fmul(&self.re, &o.im), &fmul(&self.im, &o.re));
+        Cx::new(re, im)
+    }
+
+    fn conj(&self) -> Cx {
+        Cx::new(self.re.clone(), fneg(&self.im))
+    }
+
+    fn scale(&self, s: &Fb) -> Cx {
+        Cx::new(fmul(&self.re, s), fmul(&self.im, s))
+    }
+
+    fn norm_sq(&self) -> Fb {
+        fadd(&fmul(&self.re, &self.re), &fmul(&self.im, &self.im))
+    }
+
+    fn abs(&self) -> Fb {
+        sqrt_fbig(&self.norm_sq())
+    }
+}
+
+type M2 = [[Cx; 2]; 2];
+
+fn zero_m2() -> M2 {
+    std::array::from_fn(|_| std::array::from_fn(|_| Cx::zero()))
+}
+
+fn zero_mat4() -> [[Fb; 4]; 4] {
+    std::array::from_fn(|_| std::array::from_fn(|_| fzero()))
+}
+
 fn matrix_from_gates(gates: &str) -> M2 {
     let m = DOmegaUnitary::from_gates(gates).to_complex_matrix();
     [
         [
-            Complex::new(to_f64(&m[(0, 0)].re), to_f64(&m[(0, 0)].im)),
-            Complex::new(to_f64(&m[(0, 1)].re), to_f64(&m[(0, 1)].im)),
+            Cx::new(m[(0, 0)].re.clone(), m[(0, 0)].im.clone()),
+            Cx::new(m[(0, 1)].re.clone(), m[(0, 1)].im.clone()),
         ],
         [
-            Complex::new(to_f64(&m[(1, 0)].re), to_f64(&m[(1, 0)].im)),
-            Complex::new(to_f64(&m[(1, 1)].re), to_f64(&m[(1, 1)].im)),
+            Cx::new(m[(1, 0)].re.clone(), m[(1, 0)].im.clone()),
+            Cx::new(m[(1, 1)].re.clone(), m[(1, 1)].im.clone()),
         ],
     ]
 }
 
 fn mat_mul(a: &M2, b: &M2) -> M2 {
-    let mut r = [[Complex::new(0.0, 0.0); 2]; 2];
+    let mut r = zero_m2();
     for i in 0..2 {
         for j in 0..2 {
-            let mut s = Complex::new(0.0, 0.0);
+            let mut s = Cx::zero();
             for k in 0..2 {
-                s += a[i][k] * b[k][j];
+                s = s.add(&a[i][k].mul(&b[k][j]));
             }
             r[i][j] = s;
         }
@@ -104,122 +233,205 @@ fn mat_dagger(a: &M2) -> M2 {
 }
 
 fn pauli_basis() -> [M2; 4] {
-    let zero = Complex::new(0.0, 0.0);
-    let one = Complex::new(1.0, 0.0);
-    let i = Complex::new(0.0, 1.0);
-    let id = [[one, zero], [zero, one]];
-    let x = [[zero, one], [one, zero]];
-    let y = [[zero, -i], [i, zero]];
-    let z = [[one, zero], [zero, -one]];
+    let zero = Cx::zero();
+    let one = Cx::real(fone());
+    let neg_one = Cx::real(fneg(&fone()));
+    let i_val = Cx::new(fzero(), fone());
+    let neg_i = Cx::new(fzero(), fneg(&fone()));
+    let id = [[one.clone(), zero.clone()], [zero.clone(), one.clone()]];
+    let x = [[zero.clone(), one.clone()], [one.clone(), zero.clone()]];
+    let y = [[zero.clone(), neg_i], [i_val, zero.clone()]];
+    let z = [[one, zero.clone()], [zero, neg_one]];
     [id, x, y, z]
 }
 
 /// Pauli transfer matrix `R[P][Q] = (1/2) Re(Tr[sigma_P * Lambda(sigma_Q)])` for
 /// `Lambda(rho) = sum_k weight_k * U_k * rho * U_k^dagger`.
-fn ptm(branches: &[(f64, M2)]) -> [[f64; 4]; 4] {
+fn ptm(branches: &[(Fb, M2)]) -> [[Fb; 4]; 4] {
     let sigma = pauli_basis();
-    let mut r = [[0.0; 4]; 4];
+    let mut r = zero_mat4();
+    let half = fdiv(&fone(), &ib_to_bf_prec(IBig::from(2)));
     for (q_idx, sq) in sigma.iter().enumerate() {
-        let mut lambda_sq = [[Complex::new(0.0, 0.0); 2]; 2];
-        for &(weight, ref u) in branches {
+        let mut lambda_sq = zero_m2();
+        for (weight, u) in branches {
             let u_dagger = mat_dagger(u);
             let term = mat_mul(&mat_mul(u, sq), &u_dagger);
             for i in 0..2 {
                 for j in 0..2 {
-                    lambda_sq[i][j] += term[i][j] * weight;
+                    lambda_sq[i][j] = lambda_sq[i][j].add(&term[i][j].scale(weight));
                 }
             }
         }
         for (p_idx, sp) in sigma.iter().enumerate() {
             let prod = mat_mul(sp, &lambda_sq);
-            let trace = prod[0][0] + prod[1][1];
-            r[p_idx][q_idx] = 0.5 * trace.re;
+            let trace = prod[0][0].add(&prod[1][1]);
+            r[p_idx][q_idx] = fmul(&half, &trace.re);
         }
     }
     r
 }
 
 /// Target channel `Z_theta(rho) = R_z(theta) rho R_z(theta)^dagger`,
-/// `R_z(theta) = diag(e^{-i*theta/2}, e^{i*theta/2})` (this crate's convention).
-fn target_matrix(theta: f64) -> M2 {
-    let half = theta / 2.0;
-    let zero = Complex::new(0.0, 0.0);
+/// `R_z(theta) = diag(e^{-i*theta/2}, e^{i*theta/2})` (this crate's convention), built directly
+/// from the half-angle's cosine/sine so callers with only a residual half-angle (no plain
+/// `theta` to hand to `cos_fbig`/`sin_fbig`, e.g. `theta - Arg(v)`) can reuse it -- see
+/// `residual_cos_sin`/`half_angle_cos_sin`.
+fn target_matrix_from_half(cos_half: &Fb, sin_half: &Fb) -> M2 {
+    let zero = Cx::zero();
     [
-        [Complex::new(half.cos(), -half.sin()), zero],
-        [zero, Complex::new(half.cos(), half.sin())],
+        [Cx::new(cos_half.clone(), fneg(sin_half)), zero.clone()],
+        [zero, Cx::new(cos_half.clone(), sin_half.clone())],
     ]
+}
+
+fn target_matrix(theta: &Fb) -> M2 {
+    let two = ib_to_bf_prec(IBig::from(2));
+    let half = fdiv(theta, &two);
+    target_matrix_from_half(&cos_fbig(&half), &sin_fbig(&half))
 }
 
 /// `delta_q_P` from the diagonal of a *difference* of two channels' PTMs (each channel's own
 /// `q_I+q_X+q_Y+q_Z=1` normalization cancels exactly in a genuine difference, so only the
 /// linear part applies -- verified in `debug_tests` below by checking a channel against
 /// itself gives exactly 0, not the `1` a naive "reapply the affine +1 formula" mistake gives).
-fn delta_q_from_ptm_diagonal_difference(diff_diag: [f64; 4]) -> [f64; 4] {
-    let (xx, yy, zz) = (diff_diag[1], diff_diag[2], diff_diag[3]);
+fn delta_q_from_ptm_diagonal_difference(diff_diag: &[Fb; 4]) -> [Fb; 4] {
+    let four = ib_to_bf_prec(IBig::from(4));
+    let xx = &diff_diag[1];
+    let yy = &diff_diag[2];
+    let zz = &diff_diag[3];
+    let neg_xx = fneg(xx);
+    let neg_yy = fneg(yy);
+
+    let s_xyz = fadd(&fadd(xx, yy), zz);
+    let s_x_yz = fsub(&fsub(xx, yy), zz);
+    let s_mx_y_z = fsub(&fadd(&neg_xx, yy), zz);
+    let s_mx_my_z = fadd(&fadd(&neg_xx, &neg_yy), zz);
+
     [
-        (xx + yy + zz) / 4.0,
-        (xx - yy - zz) / 4.0,
-        (-xx + yy - zz) / 4.0,
-        (-xx - yy + zz) / 4.0,
+        fdiv(&s_xyz, &four),
+        fdiv(&s_x_yz, &four),
+        fdiv(&s_mx_y_z, &four),
+        fdiv(&s_mx_my_z, &four),
     ]
 }
 
-/// Diamond distance of a channel to a target Z-rotation, valid ONLY when the channel is
+/// Diamond distance of a channel to a `target` channel matrix, valid ONLY when the channel is
 /// genuinely (or was constructed to be, e.g. via a {Z,S} twirl) Pauli-diagonal relative to
 /// that target -- see the module docs. Also returns the max absolute off-diagonal entry of
 /// the difference PTM as a diagnostic: large values here mean the Pauli-diagonal precondition
 /// does not hold and the returned "distance" should not be trusted.
-fn pauli_diamond_distance_from_branches(branches: &[(f64, M2)], theta: f64) -> (f64, f64) {
+fn pauli_diamond_distance_from_target(branches: &[(Fb, M2)], target: M2) -> (Fb, Fb) {
     let actual = ptm(branches);
-    let target = ptm(&[(1.0, target_matrix(theta))]);
+    let target_ptm = ptm(&[(fone(), target)]);
 
-    let mut diff = [[0.0; 4]; 4];
+    let mut diff = zero_mat4();
     for i in 0..4 {
         for j in 0..4 {
-            diff[i][j] = actual[i][j] - target[i][j];
+            diff[i][j] = fsub(&actual[i][j], &target_ptm[i][j]);
         }
     }
 
-    let mut max_off_diag = 0.0_f64;
+    let mut max_off_diag = fzero();
     for (i, row) in diff.iter().enumerate() {
         for (j, value) in row.iter().enumerate() {
             if i != j {
-                max_off_diag = max_off_diag.max(value.abs());
+                let av = value.clone().abs();
+                if av > max_off_diag {
+                    max_off_diag = av;
+                }
             }
         }
     }
 
-    let diag = [diff[0][0], diff[1][1], diff[2][2], diff[3][3]];
-    let dq = delta_q_from_ptm_diagonal_difference(diag);
-    let diamond_distance: f64 = dq.iter().map(|v| v.abs()).sum();
+    let diag = [
+        diff[0][0].clone(),
+        diff[1][1].clone(),
+        diff[2][2].clone(),
+        diff[3][3].clone(),
+    ];
+    let dq = delta_q_from_ptm_diagonal_difference(&diag);
+    let mut diamond_distance = fzero();
+    for v in &dq {
+        diamond_distance = fadd(&diamond_distance, &v.clone().abs());
+    }
     (diamond_distance, max_off_diag)
 }
 
-/// `Re(z * e^{i*theta/2})`, matching `WFrame::re_w`'s convention exactly.
-fn re_w_direct(z: C, theta: f64) -> f64 {
-    let half = theta / 2.0;
-    z.re * half.cos() - z.im * half.sin()
+/// Convenience wrapper of [`pauli_diamond_distance_from_target`] for callers that have a plain
+/// target angle (rather than an already-derived residual half-angle).
+fn pauli_diamond_distance_from_branches(branches: &[(Fb, M2)], theta: &Fb) -> (Fb, Fb) {
+    pauli_diamond_distance_from_target(branches, target_matrix(theta))
+}
+
+/// `(cos(phi/2), sin(phi/2))` from `(cos(phi), sin(phi))`, via the half-angle formulas,
+/// avoiding `atan2`/any inverse-trig call -- this crate does not implement arbitrary-precision
+/// inverse trig at all, so this (deliberately duplicated from
+/// `rsgridsynth::protocol::fallback`'s private `half_angle_cos_sin`, which this example -- an
+/// independent check -- may not import) is the only way to get a residual angle's own
+/// cosine/sine without ever computing the angle itself as a number.
+fn half_angle_cos_sin(cos_phi: &Fb, sin_phi: &Fb) -> (Fb, Fb) {
+    let zero = fzero();
+    if *sin_phi == zero && *cos_phi < zero {
+        return (zero, fone());
+    }
+    let two = ib_to_bf_prec(IBig::from(2));
+    let one_plus_cos = fadd(&fone(), cos_phi);
+    let one_minus_cos = fsub(&fone(), cos_phi);
+    let cos_half = sqrt_fbig(&fdiv(&one_plus_cos, &two));
+    let sin_half_mag = sqrt_fbig(&fdiv(&one_minus_cos, &two));
+    let sin_half = if sign(sin_phi.clone()) < 0 {
+        fneg(&sin_half_mag)
+    } else {
+        sin_half_mag
+    };
+    (cos_half, sin_half)
+}
+
+/// `(cos(theta - Arg(v)), sin(theta - Arg(v)))`, via the angle-subtraction identities and
+/// `(cos(Arg v), sin(Arg v)) = (Re(v), Im(v)) / |v|` -- no `atan2` needed, `Arg(v)` itself is
+/// never materialized as a number.
+fn residual_cos_sin(theta: &Fb, v: &Cx) -> (Fb, Fb) {
+    let norm = sqrt_fbig(&v.norm_sq());
+    let inv_norm = fdiv(&fone(), &norm);
+    let cos_argv = fmul(&v.re, &inv_norm);
+    let sin_argv = fmul(&v.im, &inv_norm);
+    let cos_theta = cos_fbig(theta);
+    let sin_theta = sin_fbig(theta);
+    let cos_res = fadd(&fmul(&cos_theta, &cos_argv), &fmul(&sin_theta, &sin_argv));
+    let sin_res = fsub(&fmul(&sin_theta, &cos_argv), &fmul(&cos_theta, &sin_argv));
+    (cos_res, sin_res)
 }
 
 /// Exact diamond distance between a single IDEALIZED rotation by `Arg(z)` (i.e. the unit-
 /// modulus phase `z/|z|`, NOT `z` itself -- for fallback/mixed fallback `|z|^2 = q < 1`, and
 /// the idealized success action is a pure phase rotation, with the magnitude deficit `1-q`
 /// entirely accounted for by the separate failure-branch weight, not by this term) and the
-/// target rotation by `theta`: `2*sqrt(1-Re(w)^2)` with `w = (z/|z|) * e^{i*theta/2}`. Always
-/// valid (no Pauli-diagonal precondition -- this is a direct unitary-vs-unitary comparison,
-/// not a mixture). Feeding this the raw (non-unit-modulus) `z` instead would conflate the
-/// magnitude deficit with angular error and give a nonsensical, epsilon-independent ~`2*sqrt(1-q)`
-/// answer -- exactly the bug an earlier version of this file had, caught by comparing against
-/// `plain_diagonal_epsilon_convention_calibration`'s epsilon-scaling expectation.
-fn single_rotation_diamond_distance(z: C, theta: f64) -> f64 {
-    let norm = (z.re * z.re + z.im * z.im).sqrt();
-    let phase = z / norm;
-    let re_w = re_w_direct(phase, theta).clamp(-1.0, 1.0);
-    2.0 * (1.0 - re_w * re_w).max(0.0).sqrt()
+/// target rotation by `theta`: `2*|Im(w)|` with `w = (z/|z|) * e^{i*theta/2}` -- equal to
+/// `2*sqrt(1-Re(w)^2)` since `w` is unit-modulus, but numerically stable at tight epsilon (see
+/// module docs). Always valid (no Pauli-diagonal precondition -- this is a direct
+/// unitary-vs-unitary comparison, not a mixture). Feeding this the raw (non-unit-modulus) `z`
+/// instead would conflate the magnitude deficit with angular error and give a nonsensical,
+/// epsilon-independent ~`2*sqrt(1-q)` answer -- exactly the bug an earlier version of this file
+/// had, caught by comparing against `plain_diagonal_epsilon_convention_calibration`'s
+/// epsilon-scaling expectation.
+fn single_rotation_diamond_distance(z: &Cx, theta: &Fb) -> Fb {
+    let norm = sqrt_fbig(&z.norm_sq());
+    let phase = z.scale(&fdiv(&fone(), &norm));
+    let two = ib_to_bf_prec(IBig::from(2));
+    let half = fdiv(theta, &two);
+    let c = cos_fbig(&half);
+    let s = sin_fbig(&half);
+    // Im(w) = z_x*Im(u) - z_y*Re(u), z_x = cos(half), z_y = -sin(half) (WFrame's convention).
+    let im_w = fadd(&fmul(&phase.im, &c), &fmul(&phase.re, &s));
+    fmul(&ib_to_bf_prec(IBig::from(2)), &im_w.abs())
 }
 
-fn fbig_to_f64_pub(x: &dashu_float::FBig<dashu_float::round::mode::HalfEven>) -> f64 {
-    to_f64(x)
+/// `(z/|z|)^2 = e^{2i*Arg(z)}`, computed as `z^2 / |z|^2` (a single division by the *squared*
+/// norm, no square root) rather than normalizing `z` first and squaring -- one fewer
+/// transcendental step, and avoids ever computing `Arg(z)` as a number (see module docs).
+fn phase_sq_from_z(z: &Cx) -> Cx {
+    let inv_norm_sq = fdiv(&fone(), &z.norm_sq());
+    z.mul(z).scale(&inv_norm_sq)
 }
 
 /// Exact diamond distance of a weighted combination of same-axis (Z-)rotations minus a
@@ -232,51 +444,56 @@ fn fbig_to_f64_pub(x: &dashu_float::FBig<dashu_float::round::mode::HalfEven>) ->
 /// exactly this form (diagonal-preserving, off-diagonal scaled by one fixed complex number),
 /// the diamond norm equals `|c|` exactly, achieved by the maximally-coherent probe state --
 /// verified against the ALREADY-independently-checked single-rotation formula
-/// `2*|sin(delta)|` as the `w=[1.0]` special case in `debug_tests` below (both formulas must
-/// agree there, and they do, in closed form: `|e^{-2i*delta}-1| = 2*|sin(delta)|` exactly).
+/// `2*|sin(delta)|` as the single-branch special case in `debug_tests` below (both formulas
+/// must agree there, and they do, in closed form: `|e^{-2i*delta}-1| = 2*|sin(delta)|`
+/// exactly).
+///
+/// Takes each branch's `e^{-2i*psi_k}` directly (as `phase_sq_from_z` produces, see that
+/// function's docs) rather than `psi_k` itself, so this never needs `Arg`/`atan2` either.
 ///
 /// This is what lets mixed fallback's projective-mixing cancellation (the whole point of the
 /// protocol) be verified independently of the crate's own `mixture_weight` closed form: a
 /// naive triangle-inequality bound on the two branches SEPARATELY (an earlier version of this
 /// check) is too loose to see the cancellation at all, and wrongly looks like a failure.
-fn rotation_mixture_diamond_distance(weighted_psis: &[(f64, f64)], theta: f64) -> f64 {
-    let mut c = Complex::new(0.0, 0.0);
-    let target_phase = Complex::new(theta.cos(), -theta.sin()); // e^{-i*theta}
-    for &(w, psi) in weighted_psis {
-        let phase = Complex::new((2.0 * psi).cos(), -(2.0 * psi).sin()); // e^{-2i*psi}
-        c += w * (phase - target_phase);
+fn rotation_mixture_diamond_distance(weighted_phase_sq: &[(Fb, Cx)], theta: &Fb) -> Fb {
+    let mut c = Cx::zero();
+    let target_phase = Cx::new(cos_fbig(theta), fneg(&sin_fbig(theta))); // e^{-i*theta}
+    for (w, phase_sq) in weighted_phase_sq {
+        let diff = phase_sq.sub(&target_phase);
+        c = c.add(&diff.scale(w));
     }
-    (c.re * c.re + c.im * c.im).sqrt()
+    c.abs()
 }
 
-/// `-Arg(z)`, i.e. the `psi` such that the idealized rotation `diag(z/|z|, conj(z)/|z|)`
-/// equals `diag(e^{-i*psi}, e^{i*psi})` -- matching the target's own `diag(e^{-i*theta/2},
-/// e^{i*theta/2})` convention.
-fn psi_from_z(z: C) -> f64 {
-    -z.im.atan2(z.re)
-}
-
-fn mixed_diagonal_pauli_branches(result: &MixedDiagonalResult) -> Vec<(f64, M2)> {
+fn mixed_diagonal_pauli_branches(result: &MixedDiagonalResult) -> Vec<(Fb, M2)> {
     result
         .branches
         .iter()
-        .map(|b| (fbig_to_f64_pub(&b.weight), matrix_from_gates(&b.gates)))
+        .map(|b| (b.weight.clone(), matrix_from_gates(&b.gates)))
         .collect()
 }
 
 /// Triangle-inequality upper bound on the total diamond distance of a plain fallback result:
 /// `q * single_rotation_distance(z, theta) + (1-q) * pauli_distance(B, theta - Arg(v))`.
 /// Returns `(bound, correction_off_diagonal_diagnostic)`.
-fn fallback_upper_bound(result: &FallbackResult, z: C, v: C, theta: f64) -> (f64, f64) {
-    let q = fbig_to_f64_pub(&result.success_probability);
+fn fallback_upper_bound(result: &FallbackResult, z: &Cx, v: &Cx, theta: &Fb) -> (Fb, Fb) {
+    let q = result.success_probability.clone();
     let success_term = single_rotation_diamond_distance(z, theta);
 
-    let residual_theta = theta - v.im.atan2(v.re);
+    let (cos_res, sin_res) = residual_cos_sin(theta, v);
+    let (cos_half, sin_half) = half_angle_cos_sin(&cos_res, &sin_res);
+    let target = target_matrix_from_half(&cos_half, &sin_half);
+
     let b_matrix = matrix_from_gates(&result.correction_gates);
     let (correction_term, off_diag) =
-        pauli_diamond_distance_from_branches(&[(1.0, b_matrix)], residual_theta);
+        pauli_diamond_distance_from_target(&[(fone(), b_matrix)], target);
 
-    (q * success_term + (1.0 - q) * correction_term, off_diag)
+    let one_minus_q = fsub(&fone(), &q);
+    let bound = fadd(
+        &fmul(&q, &success_term),
+        &fmul(&one_minus_q, &correction_term),
+    );
+    (bound, off_diag)
 }
 
 /// Total diamond-distance bound for a mixed fallback result, correctly exploiting the
@@ -296,45 +513,57 @@ fn fallback_upper_bound(result: &FallbackResult, z: C, v: C, theta: f64) -> (f64
 /// Combining the three brackets via the triangle inequality is a valid (if not perfectly
 /// tight, since the theorem's own formula could in principle also correlate the correction
 /// terms with the success terms) upper bound.
-/// One side of a mixed fallback result, bundled with the `z`/`v` complex entries extracted
-/// from its re-multiplied projective gate matrix (purely to keep
-/// `mixed_fallback_total_bound`'s argument count clippy-clean).
 struct MixedFallbackSideInput<'a> {
     side: &'a MixedFallbackSide,
-    z: C,
-    v: C,
+    z: Cx,
+    v: Cx,
 }
 
 fn mixed_fallback_total_bound(
     lo: &MixedFallbackSideInput,
     hi: &MixedFallbackSideInput,
-    p: f64,
-    theta: f64,
-) -> (f64, f64) {
-    let q_lo = fbig_to_f64_pub(&lo.side.success_probability);
-    let q_hi = fbig_to_f64_pub(&hi.side.success_probability);
+    p: &Fb,
+    theta: &Fb,
+) -> (Fb, Fb) {
+    let q_lo = lo.side.success_probability.clone();
+    let q_hi = hi.side.success_probability.clone();
+    let one_minus_p = fsub(&fone(), p);
 
-    let psi_lo = psi_from_z(lo.z);
-    let psi_hi = psi_from_z(hi.z);
+    let phase_sq_lo = phase_sq_from_z(&lo.z);
+    let phase_sq_hi = phase_sq_from_z(&hi.z);
+    let w_lo = fmul(p, &q_lo);
+    let w_hi = fmul(&one_minus_p, &q_hi);
     let projective_term =
-        rotation_mixture_diamond_distance(&[(p * q_lo, psi_lo), ((1.0 - p) * q_hi, psi_hi)], theta);
+        rotation_mixture_diamond_distance(&[(w_lo, phase_sq_lo), (w_hi, phase_sq_hi)], theta);
 
-    let residual_theta_lo = theta - lo.v.im.atan2(lo.v.re);
-    let (correction_lo, off_diag_lo) = pauli_diamond_distance_from_branches(
+    let (cos_res_lo, sin_res_lo) = residual_cos_sin(theta, &lo.v);
+    let (cos_half_lo, sin_half_lo) = half_angle_cos_sin(&cos_res_lo, &sin_res_lo);
+    let target_lo = target_matrix_from_half(&cos_half_lo, &sin_half_lo);
+    let (correction_lo, off_diag_lo) = pauli_diamond_distance_from_target(
         &mixed_diagonal_pauli_branches(&lo.side.correction),
-        residual_theta_lo,
+        target_lo,
     );
 
-    let residual_theta_hi = theta - hi.v.im.atan2(hi.v.re);
-    let (correction_hi, off_diag_hi) = pauli_diamond_distance_from_branches(
+    let (cos_res_hi, sin_res_hi) = residual_cos_sin(theta, &hi.v);
+    let (cos_half_hi, sin_half_hi) = half_angle_cos_sin(&cos_res_hi, &sin_res_hi);
+    let target_hi = target_matrix_from_half(&cos_half_hi, &sin_half_hi);
+    let (correction_hi, off_diag_hi) = pauli_diamond_distance_from_target(
         &mixed_diagonal_pauli_branches(&hi.side.correction),
-        residual_theta_hi,
+        target_hi,
     );
 
-    let bound = projective_term
-        + p * (1.0 - q_lo) * correction_lo
-        + (1.0 - p) * (1.0 - q_hi) * correction_hi;
-    (bound, off_diag_lo.max(off_diag_hi))
+    let one_minus_q_lo = fsub(&fone(), &q_lo);
+    let one_minus_q_hi = fsub(&fone(), &q_hi);
+    let term_lo = fmul(&fmul(p, &one_minus_q_lo), &correction_lo);
+    let term_hi = fmul(&fmul(&one_minus_p, &one_minus_q_hi), &correction_hi);
+    let bound = fadd(&fadd(&projective_term, &term_lo), &term_hi);
+
+    let off_diag = if off_diag_lo > off_diag_hi {
+        off_diag_lo
+    } else {
+        off_diag_hi
+    };
+    (bound, off_diag)
 }
 
 fn main() {
@@ -348,72 +577,88 @@ fn main() {
         1.9,
         4.2,
     ];
-    let epsilons = [1e-4, 1e-6, 1e-8];
+    let epsilons = [1e-4, 1e-6, 1e-8, 1e-10, 1e-12, 1e-15];
     let q = exact_q(7);
 
     println!("protocol,theta,epsilon,epsilon_diamond_requested,achieved_diamond_distance_upper_bound,off_diagonal_diagnostic,meets_budget");
 
     for &eps in &epsilons {
-        for (i, &theta) in thetas.iter().enumerate() {
+        for (i, &theta_f64) in thetas.iter().enumerate() {
             let seed = 2000 + i as u64;
 
             clear_caches();
-            let md = synth_mixed_diagonal(theta, eps, seed, false);
+            let md = synth_mixed_diagonal(theta_f64, eps, seed, false);
+            let theta = to_fbig(theta_f64);
+            let eps_fb = to_fbig(eps);
             let branches = mixed_diagonal_pauli_branches(&md);
-            let (dd, max_od) = pauli_diamond_distance_from_branches(&branches, theta);
+            let (dd, max_od) = pauli_diamond_distance_from_branches(&branches, &theta);
             println!(
-                "mixed_diagonal,{theta},{eps},{eps},{dd},{max_od},{}",
-                dd <= eps
+                "mixed_diagonal,{theta_f64},{eps},{eps},{},{},{}",
+                to_f64(&dd),
+                to_f64(&max_od),
+                dd <= eps_fb
             );
 
             clear_caches();
             let sin_alpha = eps / 4.0;
-            match synth_fallback(theta, eps, q.clone(), sin_alpha, seed, false) {
+            match synth_fallback(theta_f64, eps, q.clone(), sin_alpha, seed, false) {
                 Some(result) => {
+                    let theta = to_fbig(theta_f64);
+                    let eps_fb = to_fbig(eps);
                     let v_mat = matrix_from_gates(&result.projective_gates);
-                    let z = v_mat[0][0];
-                    let v = v_mat[1][0];
-                    let (bound, off_diag) = fallback_upper_bound(&result, z, v, theta);
+                    let z = v_mat[0][0].clone();
+                    let v = v_mat[1][0].clone();
+                    let (bound, off_diag) = fallback_upper_bound(&result, &z, &v, &theta);
                     println!(
-                        "fallback,{theta},{eps},{eps},{bound},{off_diag},{}",
-                        bound <= eps
+                        "fallback,{theta_f64},{eps},{eps},{},{},{}",
+                        to_f64(&bound),
+                        to_f64(&off_diag),
+                        bound <= eps_fb
                     );
                 }
-                None => println!("fallback,{theta},{eps},{eps},ERROR,NotFound,false"),
+                None => println!("fallback,{theta_f64},{eps},{eps},ERROR,NotFound,false"),
             }
 
             clear_caches();
-            match synth_mixed_fallback(theta, eps, q.clone(), seed, false) {
+            match synth_mixed_fallback(theta_f64, eps, q.clone(), seed, false) {
                 Some(MixedFallbackResult::Exact { gates }) => {
+                    let theta = to_fbig(theta_f64);
+                    let eps_fb = to_fbig(eps);
                     let m = matrix_from_gates(&gates);
-                    let (dd, off_diag) = pauli_diamond_distance_from_branches(&[(1.0, m)], theta);
+                    let (dd, off_diag) =
+                        pauli_diamond_distance_from_branches(&[(fone(), m)], &theta);
                     println!(
-                        "mixed_fallback,{theta},{eps},{eps},{dd},{off_diag},{}",
-                        dd <= eps
+                        "mixed_fallback,{theta_f64},{eps},{eps},{},{},{}",
+                        to_f64(&dd),
+                        to_f64(&off_diag),
+                        dd <= eps_fb
                     );
                 }
                 Some(MixedFallbackResult::Mixed { lo, hi, p, .. }) => {
-                    let p_f64 = fbig_to_f64_pub(&p);
+                    let theta = to_fbig(theta_f64);
+                    let eps_fb = to_fbig(eps);
                     let lo_v = matrix_from_gates(&lo.projective_gates);
                     let hi_v = matrix_from_gates(&hi.projective_gates);
                     let lo_input = MixedFallbackSideInput {
                         side: &lo,
-                        z: lo_v[0][0],
-                        v: lo_v[1][0],
+                        z: lo_v[0][0].clone(),
+                        v: lo_v[1][0].clone(),
                     };
                     let hi_input = MixedFallbackSideInput {
                         side: &hi,
-                        z: hi_v[0][0],
-                        v: hi_v[1][0],
+                        z: hi_v[0][0].clone(),
+                        v: hi_v[1][0].clone(),
                     };
                     let (bound, off_diag) =
-                        mixed_fallback_total_bound(&lo_input, &hi_input, p_f64, theta);
+                        mixed_fallback_total_bound(&lo_input, &hi_input, &p, &theta);
                     println!(
-                        "mixed_fallback,{theta},{eps},{eps},{bound},{off_diag},{}",
-                        bound <= eps
+                        "mixed_fallback,{theta_f64},{eps},{eps},{},{},{}",
+                        to_f64(&bound),
+                        to_f64(&off_diag),
+                        bound <= eps_fb
                     );
                 }
-                None => println!("mixed_fallback,{theta},{eps},{eps},ERROR,NotFound,false"),
+                None => println!("mixed_fallback,{theta_f64},{eps},{eps},ERROR,NotFound,false"),
             }
         }
     }
@@ -422,14 +667,34 @@ fn main() {
 #[cfg(test)]
 mod debug_tests {
     use super::*;
+    use rsgridsynth::common::reset_prec_bits;
+    use serial_test::serial;
+
+    // `PREC_BITS` (see `rsgridsynth::common`) is a single process-global atomic that every
+    // `cos_fbig`/`sin_fbig`/`fb_with_prec` call in this file reads. `cargo test` runs tests in
+    // this module concurrently by default, and `plain_diagonal_epsilon_convention_calibration`
+    // below mutates `PREC_BITS` (via `config_from_theta_epsilon`) across a range of epsilons --
+    // so without `#[serial]` + an explicit `reset_prec_bits()`, a test's own trig calls can
+    // observe a precision far lower than intended mid-computation, corrupting a cancellation-
+    // heavy result (this is exactly what flagged an apparent bug in
+    // `rotation_mixture_matches_quadratic_cancellation_residual` during development: the
+    // formula was fine, but a concurrently-running test had transiently dropped `PREC_BITS` to
+    // ~36 bits). Every test below follows this crate's own established convention (see
+    // `tests/integration_test.rs`, `src/protocol/mixing.rs`) of `#[serial]` plus
+    // `reset_prec_bits()` for exactly this reason.
 
     #[test]
+    #[serial]
     fn self_consistency_target_vs_itself() {
-        let theta = 0.7_f64;
-        let m = target_matrix(theta);
-        let (dd, max_od) = pauli_diamond_distance_from_branches(&[(1.0, m)], theta);
-        eprintln!("dd={dd}, max_od={max_od}");
-        assert!(dd < 1e-9, "self-comparison should give ~0, got {dd}");
+        reset_prec_bits();
+        let theta = to_fbig(0.7_f64);
+        let m = target_matrix(&theta);
+        let (dd, max_od) = pauli_diamond_distance_from_branches(&[(fone(), m)], &theta);
+        eprintln!("dd={}, max_od={}", to_f64(&dd), to_f64(&max_od));
+        assert!(
+            to_f64(&dd) < 1e-9,
+            "self-comparison should give ~0, got {dd}"
+        );
     }
 
     /// Locks in the derivation `delta_q_from_ptm_diagonal_difference` is built from: a pure
@@ -437,6 +702,7 @@ mod debug_tests {
     /// `q_I=1`, others 0; a pure-Z channel's PTM diagonal is `[1,-1,-1,1]` (Z fixes I and Z,
     /// negates X and Y) and decomposes to `q_Z=1`, others 0.
     #[test]
+    #[serial]
     fn q_from_ptm_diagonal_matches_known_pauli_channels() {
         fn q_from_ptm_diagonal(diag: [f64; 4]) -> [f64; 4] {
             let (xx, yy, zz) = (diag[1], diag[2], diag[3]);
@@ -459,39 +725,43 @@ mod debug_tests {
     }
 
     #[test]
+    #[serial]
     fn identity_channel_vs_target_theta_zero() {
-        let theta = 0.0_f64;
-        let zero = Complex::new(0.0, 0.0);
-        let one = Complex::new(1.0, 0.0);
-        let id = [[one, zero], [zero, one]];
-        let (dd, max_od) = pauli_diamond_distance_from_branches(&[(1.0, id)], theta);
-        eprintln!("dd={dd}, max_od={max_od}");
+        reset_prec_bits();
+        let theta = to_fbig(0.0_f64);
+        let id = [
+            [Cx::real(fone()), Cx::zero()],
+            [Cx::zero(), Cx::real(fone())],
+        ];
+        let (dd, max_od) = pauli_diamond_distance_from_branches(&[(fone(), id)], &theta);
+        eprintln!("dd={}, max_od={}", to_f64(&dd), to_f64(&max_od));
         assert!(
-            dd < 1e-9,
+            to_f64(&dd) < 1e-9,
             "identity vs target(theta=0) should give ~0, got {dd}"
         );
     }
 
     /// `single_rotation_diamond_distance` cross-checked against the Pauli-diagonal formula
-    /// for the special case where they SHOULD agree (a lone rotation IS trivially
-    /// Pauli-diagonal relative to another rotation about the same axis when compared this
-    /// way is not generally true off-diagonally, but the diamond DISTANCE value itself, for a
-    /// single unitary vs a single target unitary, has a well-known closed form regardless --
-    /// this test checks `single_rotation_diamond_distance` against the textbook value
-    /// `2*|sin(delta/2)|`... actually the exact value for two Z-rotations by phi1, phi2 is
-    /// `2*|sin((phi1-phi2)/2)|`; verify against a direct small example instead of re-deriving).
+    /// for the special case where they SHOULD agree.
     /// `rotation_mixture_diamond_distance`'s single-weight special case must agree exactly
     /// with `single_rotation_diamond_distance` (both independently derived, one via the
-    /// Pauli-transfer/witness argument, one via the direct `2*sqrt(1-Re(w)^2)` formula).
+    /// Pauli-transfer/witness argument, one via the direct `2*|Im(w)|` formula).
     #[test]
+    #[serial]
     fn rotation_mixture_matches_single_rotation_special_case() {
-        let theta = 0.5_f64;
-        let z = target_matrix(theta + 0.02)[0][0]; // a small angular error, unit modulus
-        let psi = psi_from_z(z);
-        let via_mixture = rotation_mixture_diamond_distance(&[(1.0, psi)], theta);
-        let via_single = single_rotation_diamond_distance(z, theta);
-        eprintln!("via_mixture={via_mixture}, via_single={via_single}");
-        assert!((via_mixture - via_single).abs() < 1e-9);
+        reset_prec_bits();
+        let theta = to_fbig(0.5_f64);
+        let z_theta = to_fbig(0.52_f64); // theta + a small angular error, unit modulus target
+        let z = target_matrix(&z_theta)[0][0].clone();
+        let phase_sq = phase_sq_from_z(&z);
+        let via_mixture = rotation_mixture_diamond_distance(&[(fone(), phase_sq)], &theta);
+        let via_single = single_rotation_diamond_distance(&z, &theta);
+        eprintln!(
+            "via_mixture={}, via_single={}",
+            to_f64(&via_mixture),
+            to_f64(&via_single)
+        );
+        assert!((to_f64(&via_mixture) - to_f64(&via_single)).abs() < 1e-9);
     }
 
     /// A symmetric straddling pair (equal and opposite angular error `delta`, equal weight
@@ -502,55 +772,71 @@ mod debug_tests {
     /// quadratic order in delta, it does not eliminate it. An earlier version of this test
     /// wrongly asserted exactly-zero and "failed" on a numerically-correct result.
     #[test]
+    #[serial]
     fn rotation_mixture_matches_quadratic_cancellation_residual() {
-        let theta = 0.5_f64;
+        reset_prec_bits();
+        let theta = to_fbig(0.5_f64);
         let delta = 0.001_f64; // paper's delta_k = Arg(z_k) - theta/2
-        let z_lo = target_matrix(theta - 2.0 * delta)[0][0]; // psi_lo = theta/2 - delta
-        let z_hi = target_matrix(theta + 2.0 * delta)[0][0]; // psi_hi = theta/2 + delta
-        let psi_lo = psi_from_z(z_lo);
-        let psi_hi = psi_from_z(z_hi);
-        let dd = rotation_mixture_diamond_distance(&[(0.5, psi_lo), (0.5, psi_hi)], theta);
+        let z_lo = target_matrix(&to_fbig(0.5 - 2.0 * delta))[0][0].clone(); // psi_lo = theta/2 - delta
+        let z_hi = target_matrix(&to_fbig(0.5 + 2.0 * delta))[0][0].clone(); // psi_hi = theta/2 + delta
+        let phase_sq_lo = phase_sq_from_z(&z_lo);
+        let phase_sq_hi = phase_sq_from_z(&z_hi);
+        let half = to_fbig(0.5);
+        let dd = rotation_mixture_diamond_distance(
+            &[(half.clone(), phase_sq_lo), (half, phase_sq_hi)],
+            &theta,
+        );
         let expected = 2.0 * (0.5 * delta.sin().powi(2) + 0.5 * delta.sin().powi(2));
-        eprintln!("symmetric-mixing dd={dd}, expected quadratic residual={expected}");
+        eprintln!(
+            "symmetric-mixing dd={}, expected quadratic residual={expected}",
+            to_f64(&dd)
+        );
         assert!(
-            (dd - expected).abs() < 1e-12,
-            "got {dd}, expected {expected}"
+            (to_f64(&dd) - expected).abs() < 1e-12,
+            "got {}, expected {expected}",
+            to_f64(&dd)
         );
     }
 
     #[test]
+    #[serial]
     fn single_rotation_distance_matches_known_small_case() {
+        reset_prec_bits();
         // R_z(theta) vs R_z(theta + delta): known exact diamond distance 2*|sin(delta/2)|.
-        let theta = 0.5_f64;
+        let theta = to_fbig(0.5_f64);
         let delta = 0.02_f64;
-        let z = target_matrix(theta + delta)[0][0];
-        let got = single_rotation_diamond_distance(z, theta);
+        let z = target_matrix(&to_fbig(0.5 + delta))[0][0].clone();
+        let got = single_rotation_diamond_distance(&z, &theta);
         let expected = 2.0 * (delta / 2.0).sin().abs();
-        eprintln!("got={got}, expected={expected}");
+        eprintln!("got={}, expected={expected}", to_f64(&got));
         assert!(
-            (got - expected).abs() < 1e-9,
-            "got {got}, expected {expected}"
+            (to_f64(&got) - expected).abs() < 1e-9,
+            "got {}, expected {expected}",
+            to_f64(&got)
         );
     }
 
     /// Calibration check: what does the EXISTING, unmodified plain-diagonal protocol's
     /// `epsilon` parameter actually correspond to in diamond-norm terms?
     #[test]
+    #[serial]
     fn plain_diagonal_epsilon_convention_calibration() {
         use rsgridsynth::config::config_from_theta_epsilon;
         use rsgridsynth::gridsynth::gridsynth_gates;
 
-        for &theta in &[0.1_f64, 0.7, 1.3, 2.5] {
+        for &theta_f64 in &[0.1_f64, 0.7, 1.3, 2.5] {
             for &eps in &[1e-3_f64, 1e-4, 1e-5, 1e-6] {
                 clear_caches();
-                let mut config = config_from_theta_epsilon(theta, eps, 42, false, false);
+                let mut config = config_from_theta_epsilon(theta_f64, eps, 42, false, false);
                 let result = gridsynth_gates(&mut config);
+                let theta = to_fbig(theta_f64);
                 let m = matrix_from_gates(&result.gates);
-                let (dd, _max_od) = pauli_diamond_distance_from_branches(&[(1.0, m)], theta);
+                let (dd, _max_od) = pauli_diamond_distance_from_branches(&[(fone(), m)], &theta);
+                let dd_f64 = to_f64(&dd);
                 eprintln!(
-                    "theta={theta}, epsilon_param={eps}, achieved_diamond_distance={dd}, \
+                    "theta={theta_f64}, epsilon_param={eps}, achieved_diamond_distance={dd_f64}, \
                      ratio={:.4}",
-                    dd / eps
+                    dd_f64 / eps
                 );
             }
         }

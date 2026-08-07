@@ -4,8 +4,8 @@
 use dashu_base::RemEuclid;
 use dashu_float::{round::mode::HalfEven, FBig};
 use dashu_int::IBig;
-use once_cell::sync::Lazy;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 const PREC_BITS_INITIAL: usize = 1000;
 pub static PREC_BITS: AtomicUsize = AtomicUsize::new(PREC_BITS_INITIAL);
@@ -23,20 +23,60 @@ pub fn get_prec_bits() -> usize {
     PREC_BITS.load(Ordering::Relaxed)
 }
 
-fn compute_pi() -> FBig<HalfEven> {
+fn compute_pi_at_current_prec() -> FBig<HalfEven> {
     let pi_str = "314159265358979323846264338327950288419716939937510582097494459230781640628620899862803482534211706798214808651328230664709384460955058223172535940812848111745028410270193852110555964462294895493038196442881097566593344612847564823378678316527120190914564856692346034861045432664821339360726024914127";
     let decimals = "100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
     ib_to_bf_prec(IBig::from_str_radix(pi_str, 10).unwrap())
         / ib_to_bf_prec(IBig::from_str_radix(decimals, 10).unwrap())
 }
 
-pub static PI: Lazy<FBig<HalfEven>> = Lazy::new(compute_pi);
-pub static TAU: Lazy<FBig<HalfEven>> = Lazy::new(|| 2 * PI.clone());
+struct PiCache {
+    bits: usize,
+    value: FBig<HalfEven>,
+}
+
+static PI_CACHE: Mutex<Option<PiCache>> = Mutex::new(None);
+
+/// `pi` at the crate's current working precision (`get_prec_bits()`), cached but refreshed
+/// whenever the requested precision no longer matches what's cached.
+///
+/// `PREC_BITS` changes across calls into this crate -- e.g. every `config_from_theta_epsilon`
+/// call resizes it to fit the requested epsilon -- so a value computed and cached exactly
+/// once (as a `Lazy`/`OnceCell` constant would do) stays pinned at whatever precision was
+/// active on its *first* use for the rest of the process's lifetime. Since `cos_fbig`/
+/// `sin_fbig` (via `reduce_to_pi_range`) are on this crate's hot path, that silently degrades
+/// every later, higher-precision call in the same process to the first call's precision --
+/// exactly the kind of silent-precision-loss failure mode this crate's own design already
+/// worries about elsewhere (see the module-level docs on `PREC_BITS`), just from an
+/// unexpected source: a process that synthesizes at a small epsilon early on and a much
+/// tighter one later (e.g. a batch of rotations at increasing accuracy) would get silently
+/// wrong `cos_fbig`/`sin_fbig` results for every call after the first.
+pub fn pi() -> FBig<HalfEven> {
+    let bits = get_prec_bits();
+    {
+        let cache = PI_CACHE.lock().unwrap();
+        if let Some(c) = cache.as_ref() {
+            if c.bits == bits {
+                return c.value.clone();
+            }
+        }
+    }
+    let value = compute_pi_at_current_prec();
+    *PI_CACHE.lock().unwrap() = Some(PiCache {
+        bits,
+        value: value.clone(),
+    });
+    value
+}
+
+pub fn tau() -> FBig<HalfEven> {
+    2 * pi()
+}
 
 fn reduce_to_pi_range(mut x: FBig<HalfEven>) -> FBig<HalfEven> {
-    let tau = TAU.clone();
+    let tau = tau();
     x = x.rem_euclid(tau.clone());
-    if x > PI.clone() {
+    if x > pi() {
         x -= tau;
     }
     x

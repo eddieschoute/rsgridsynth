@@ -61,6 +61,7 @@ fn pi_over_4_exact_test() {
     let seed = 1234;
     let up_to_phase = false;
     let verbose = false;
+    clear_caches();
     let mut gridsynth_config =
         config_from_theta_epsilon(theta, epsilon, seed, verbose, up_to_phase);
     let gates = gridsynth_gates(&mut gridsynth_config).gates;
@@ -78,6 +79,7 @@ fn pi_over_4_with_phase_test() {
     let seed = 1234;
     let up_to_phase = true;
     let verbose = false;
+    clear_caches();
     let mut gridsynth_config =
         config_from_theta_epsilon(theta, epsilon, seed, verbose, up_to_phase);
     let gates = gridsynth_gates(&mut gridsynth_config).gates;
