@@ -27,6 +27,7 @@ use crate::unitary::DOmegaUnitary;
 
 use dashu_float::round::mode::HalfEven;
 use dashu_float::FBig;
+use dashu_int::ops::Abs;
 use dashu_int::IBig;
 use nalgebra::{Matrix2, Vector2};
 
@@ -228,12 +229,18 @@ pub(crate) enum StraddleOutcome {
 /// `MixedDiagonalRegion`, so a sibling region shape (e.g. the annulus sector used by "mixed
 /// fallback") can reuse this same search unchanged -- only the region's `inside`/`intersect`
 /// predicates differ; the bucket-by-sign-of-`Im(w)` logic here is region-agnostic.
+///
+/// `phase_tolerance` bounds how far off-angle (in `|Im(w)|`) an exact-ring-unitary candidate
+/// (`|z| == 1`, see below) may be before the "no mixing needed" fast path is allowed to claim
+/// it as the final answer -- callers should pass the same spec epsilon used to build `region`.
+/// See the fast path's inline comment for why this check exists.
 pub(crate) fn search_for_straddling_pair<A: Region + std::fmt::Debug>(
     region: &A,
     unit_disk: &UnitDisk,
     transformed: &UprightTransform,
     config: &mut GridSynthConfig,
     wframe: &WFrame,
+    phase_tolerance: &FBig<HalfEven>,
 ) -> StraddleOutcome {
     // See `gridsynth::search_for_solution` for the rationale behind this bound: it is
     // effectively unreachable for well-formed inputs and exists only to fail loudly (rather
@@ -264,17 +271,34 @@ pub(crate) fn search_for_straddling_pair<A: Region + std::fmt::Debug>(
 
                 let xi = DRootTwo::from_int(IBig::ONE) - DRootTwo::from_domega(z.conj() * &z);
 
-                // Ring-exact zero-error check: `xi == 1 - |z|^2` is computed purely from exact
-                // ring arithmetic on `z`, so it is genuinely, bit-exactly zero whenever `z`
-                // algebraically equals the target direction (e.g. for theta a multiple of
-                // pi/4). This is deliberately NOT `wframe.im_w(&z) == 0`: `im_w` mixes two
-                // *independently rounded* floating approximations of the same irrational
-                // value (`cos_fbig`/`sin_fbig`'s Taylor series for `z_x`/`z_y` vs. `sqrt2()`'s
-                // Newton iteration inside `u.real()`/`u.imag()`), which in general does not
-                // cancel to bit-exact zero even when the true rotation error is exactly zero.
-                // Relying on `im_w == 0` here would (and, before this fix, did) silently miss
-                // the exact-angle case and fall through to a wasted, suboptimal Mixed search.
-                if xi.to_real() == zero {
+                // Floating-point `im_w` is used both to bucket non-exact candidates into the
+                // under-/over-rotation slots below, and (see immediately below) to gate the
+                // ring-exactness fast path. A landed-on-the-boundary `im == 0` for bucketing
+                // purposes is just rounding noise, so it is folded into the `lo` (`<= 0`)
+                // bucket, which still satisfies `mixture_weight`'s `im_lo <= 0 <= im_hi`
+                // precondition.
+                let im = wframe.im_w(&z);
+
+                // Ring-exact zero-*synthesis*-error check: `xi == 1 - |z|^2` is computed
+                // purely from exact ring arithmetic on `z`, so it is genuinely, bit-exactly
+                // zero whenever `|z| == 1`, i.e. `z` is already a unitary and needs no `w`
+                // correction. This is NOT, by itself, "z is the target direction": `z` only
+                // has to satisfy the *search region's* (at loose `epsilon` values, sometimes
+                // wide) containment check, not the tight target tolerance. So an exact-ring
+                // point can land inside the region while still being measurably off-angle
+                // (see issue #8) -- hence the additional `im.abs() <= *phase_tolerance` gate
+                // below, using floating `im_w` (the only place that measures the *angle*, as
+                // opposed to just the magnitude `xi`) to confirm the phase genuinely matches
+                // before short-circuiting on it. `im_w` mixes two independently rounded
+                // floating approximations of the same irrational value (`cos_fbig`/`sin_fbig`'s
+                // Taylor series for `z_x`/`z_y` vs. `sqrt2()`'s Newton iteration inside
+                // `u.real()`/`u.imag()`), so it is not bit-exact even for a genuine exact
+                // match -- but that rounding noise is many orders of magnitude below
+                // `phase_tolerance` (working precision scales with `-log(epsilon)`), while a
+                // genuinely off-angle candidate that merely passed the region's wide
+                // containment check sits well above it, so the threshold cleanly separates the
+                // two cases without needing bit-exact equality.
+                if xi.to_real() == zero && im.clone().abs() <= *phase_tolerance {
                     if let Some(w_val) =
                         diophantine_dyadic(xi.clone(), &mut config.diophantine_data)
                     {
@@ -287,13 +311,6 @@ pub(crate) fn search_for_straddling_pair<A: Region + std::fmt::Debug>(
                     // Falls through to the ordinary lo/hi bucketing below in the (should not
                     // normally happen) case that the trivial xi=0 diophantine solve fails.
                 }
-
-                // Floating-point `im_w` is only used to bucket non-exact candidates into the
-                // under-/over-rotation slots; a landed-on-the-boundary `im == 0` here is just
-                // rounding noise (the ring-exact check above already handled genuine
-                // zero-error candidates), so it is folded into the `lo` (`<= 0`) bucket, which
-                // still satisfies `mixture_weight`'s `im_lo <= 0 <= im_hi` precondition.
-                let im = wframe.im_w(&z);
 
                 if im <= zero {
                     if lo.is_some() {
@@ -509,8 +526,14 @@ pub fn synth_mixed_diagonal(
     let transformed =
         setup_regions_and_transform(&region, &unit_disk, config.verbose, config.measure_time);
 
-    let outcome =
-        search_for_straddling_pair(&region, &unit_disk, &transformed, &mut config, &wframe);
+    let outcome = search_for_straddling_pair(
+        &region,
+        &unit_disk,
+        &transformed,
+        &mut config,
+        &wframe,
+        &epsilon_spec,
+    );
 
     assemble_result(outcome, &wframe)
 }
@@ -688,8 +711,15 @@ mod tests {
             let (region, unit_disk, transformed, wframe, mut config) =
                 setup(theta_f64, epsilon, 42 + k as u64);
 
-            let outcome =
-                search_for_straddling_pair(&region, &unit_disk, &transformed, &mut config, &wframe);
+            let phase_tolerance = config.epsilon.clone();
+            let outcome = search_for_straddling_pair(
+                &region,
+                &unit_disk,
+                &transformed,
+                &mut config,
+                &wframe,
+                &phase_tolerance,
+            );
             match outcome {
                 StraddleOutcome::Mixed(_, _) => {}
                 other => panic!("expected Mixed for theta={theta_f64} (k={k}), got {other:?}"),
@@ -717,8 +747,15 @@ mod tests {
             let epsilon = 1e-6;
             let (region, unit_disk, transformed, wframe, mut config) = setup(theta_f64, epsilon, 7);
 
-            let outcome =
-                search_for_straddling_pair(&region, &unit_disk, &transformed, &mut config, &wframe);
+            let phase_tolerance = config.epsilon.clone();
+            let outcome = search_for_straddling_pair(
+                &region,
+                &unit_disk,
+                &transformed,
+                &mut config,
+                &wframe,
+                &phase_tolerance,
+            );
             match outcome {
                 StraddleOutcome::Unmixed(_) => {}
                 other => panic!("expected Unmixed for theta={theta_f64}, got {other:?}"),
@@ -736,8 +773,15 @@ mod tests {
         let epsilon = 1e-6;
         let (region, unit_disk, transformed, wframe, mut config) = setup(theta_f64, epsilon, 99);
 
-        let outcome =
-            search_for_straddling_pair(&region, &unit_disk, &transformed, &mut config, &wframe);
+        let phase_tolerance = config.epsilon.clone();
+        let outcome = search_for_straddling_pair(
+            &region,
+            &unit_disk,
+            &transformed,
+            &mut config,
+            &wframe,
+            &phase_tolerance,
+        );
         let (lo, hi) = match outcome {
             StraddleOutcome::Mixed(lo, hi) => (lo, *hi),
             other => panic!("expected Mixed, got {other:?}"),
@@ -778,8 +822,15 @@ mod tests {
         let epsilon = 1e-5;
         let (region, unit_disk, transformed, wframe, mut config) = setup(theta_f64, epsilon, 55);
 
-        let outcome =
-            search_for_straddling_pair(&region, &unit_disk, &transformed, &mut config, &wframe);
+        let phase_tolerance = config.epsilon.clone();
+        let outcome = search_for_straddling_pair(
+            &region,
+            &unit_disk,
+            &transformed,
+            &mut config,
+            &wframe,
+            &phase_tolerance,
+        );
         let (lo, hi) = match outcome {
             StraddleOutcome::Mixed(lo, hi) => (lo, *hi),
             other => panic!("expected Mixed, got {other:?}"),

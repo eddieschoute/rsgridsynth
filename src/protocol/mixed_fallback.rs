@@ -261,6 +261,7 @@ fn build_side(
         &correction_transform,
         config,
         &correction_wframe,
+        &epsilon_for_correction,
     );
     let correction = assemble_result(correction_outcome, &correction_wframe);
 
@@ -308,8 +309,14 @@ pub fn synth_mixed_fallback(
         config.verbose,
         config.measure_time,
     );
-    let outcome =
-        search_for_straddling_pair(&sector_region, &unit_disk, &transform, &mut config, &wframe);
+    let outcome = search_for_straddling_pair(
+        &sector_region,
+        &unit_disk,
+        &transform,
+        &mut config,
+        &wframe,
+        &epsilon_spec,
+    );
 
     match outcome {
         StraddleOutcome::NotFound => None,
