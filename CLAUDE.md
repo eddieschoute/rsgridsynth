@@ -55,8 +55,9 @@ and runs the `#[test]` cases embedded in `examples/pauli_transfer_verification.r
 
 ## Architecture
 
-The crate implements one pipeline: angle+tolerance in → exact Clifford+T gate string out. Each stage
-lives in its own module and is called, in order, from `gridsynth::gridsynth_gates`:
+The crate implements one pipeline: angle+tolerance in → exact Clifford+T gate sequence
+(`gate::GateSeq`) out. Each stage lives in its own module and is called, in order, from
+`gridsynth::gridsynth_gates`:
 
 1. **`config.rs`** — `GridSynthConfig`/`GridSynthConfig::with_compute_error` hold theta, epsilon, RNG,
    and timeouts. `config_from_theta_epsilon` is the library entry point for embedding; it also resets
@@ -87,7 +88,19 @@ lives in its own module and is called, in order, from `gridsynth::gridsynth_gate
    denominator exponent down to 0, peeling off `H`/`T`/`S`/`W` gates one at a time based on residues mod
    2, then hands the final Clifford correction to `normal_form.rs`.
 9. **`normal_form.rs`** — canonical (coset × syllable) normal form for the Clifford group mod global
-   phase; used to simplify the trailing Clifford part of the synthesized gate string.
+   phase; used to simplify the trailing Clifford part of the synthesized gate sequence.
+
+### Gate sequences (`gate.rs`)
+
+`Gate` (`H`/`S`/`T`/`X`/`W`) and `GateSeq` (a `Vec<Gate>` newtype) are the crate's one gate
+representation; every public result type (`GridSynthResult` and the `protocol::*` results) carries a
+`GateSeq`, not a `String`. There is no `Gate::I` variant — identity is the empty sequence, and
+`GateSeq`'s `Display` renders `"I"` only for that empty case, never mid-sequence (fixing a
+historical bug where `Clifford::to_gates`'s old empty-string "I" sentinel could leak into the middle
+of a longer word, e.g. `"HTSHTI"`, that `NormalForm::from_gates` couldn't parse back). `GateSeq`
+derefs to `&[Gate]`, so most call sites that used to hold a `String` need no change beyond the field
+type; `Display`/`FromStr` are the serialization pair (`FromStr` treats `'I'` as a no-op anywhere in
+the string, for backward compatibility with pre-`GateSeq` output).
 
 ### Number rings (`src/ring/`)
 
@@ -115,11 +128,11 @@ precision the previous call left behind. This is also why `tests/integration_tes
 The binary (`src/main.rs`) is gated behind the `cli` feature (`required-features = ["cli"]`), which
 pulls in `clap`; plain `cargo build`/`cargo check` only builds the library. Library callers should go
 through `config::config_from_theta_epsilon(theta, epsilon, seed, verbose, up_to_phase)` →
-`gridsynth::gridsynth_gates(&mut config)` → `GridSynthResult { gates, global_phase }`, as in
+`gridsynth::gridsynth_gates(&mut config)` → `GridSynthResult { gates: GateSeq, global_phase }`, as in
 `examples/interface.rs`. Accuracy is not cached eagerly on the result; call
 `achieved_diamond_error(theta)` (the `accuracy::AchievedDiamondError` trait, implemented for
 `GridSynthResult` and the `protocol::*` result types) to recompute it on demand from the gate
-string. `theta`/`epsilon` on the CLI are parsed with a custom decimal+exponent parser
+sequence. `theta`/`epsilon` on the CLI are parsed with a custom decimal+exponent parser
 (`config::parse_decimal_with_exponent`) rather than through `f64`, since `f64` cannot represent the
 arbitrary decimal precision (`--dps`) the algorithm can target; the library's `f64`-based
 `config_from_theta_epsilon` entry point has been fuzz-tested for accuracy down to `epsilon = 1e-15`

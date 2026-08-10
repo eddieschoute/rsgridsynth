@@ -15,6 +15,7 @@ use crate::accuracy::{diagonal_diamond_distance, AchievedDiamondError, WFrame};
 use crate::common::{cos_fbig, fb_with_prec, get_prec_bits, ib_to_bf_prec, sin_fbig};
 use crate::config::{config_from_theta_epsilon, GridSynthConfig};
 use crate::diophantine::diophantine_dyadic;
+use crate::gate::GateSeq;
 use crate::gridsynth::{process_solution_candidate, setup_regions_and_transform, PhaseMode};
 use crate::gridsynth::{UnitDisk, UprightTransform};
 use crate::math::{solve_quadratic, sqrt_fbig};
@@ -359,11 +360,11 @@ pub(crate) fn twirl_variants(u: &DOmegaUnitary) -> [DOmegaUnitary; 4] {
     })
 }
 
-/// One weighted branch of a [`MixedDiagonalResult`]: a Clifford+T gate string and the
+/// One weighted branch of a [`MixedDiagonalResult`]: a Clifford+T gate sequence and the
 /// classical probability with which the mixed channel applies it.
 #[derive(Debug, Clone)]
 pub struct MixedDiagonalBranch {
-    pub gates: String,
+    pub gates: GateSeq,
     pub weight: FBig<HalfEven>,
 }
 
@@ -952,15 +953,8 @@ mod tests {
     // gross regression (e.g. a slope near the plain-diagonal baseline's ~3.02, which would
     // indicate the mixing isn't buying anything).
     //
-    // T-count is computed via a plain `'T'`-char count rather than
-    // `NormalForm::from_gates(..).t_count()`: `decompose_domega_unitary`'s output can, for a
-    // branch whose trailing Clifford correction happens to be trivial, legitimately contain
-    // an embedded literal `'I'` character (via `Clifford::to_gates`'s own "return \"I\" if
-    // empty" convention leaking into `NormalForm::to_gates`'s concatenation of the syllable
-    // prefix with the Clifford suffix) that `NormalForm::from_gates` cannot parse back
-    // (`append_gate` only recognizes H/S/X/W/T) -- a pre-existing gap in `src/normal_form.rs`,
-    // which is out of scope to fix here (only `mixed_diagonal.rs` is mine to edit). Since the
-    // task spec explicitly allows either method, the char-count form sidesteps it entirely.
+    // T-count is `GateSeq::t_count()`, which counts `Gate::T` occurrences directly -- no
+    // string round-trip through `NormalForm` needed.
     #[test]
     #[serial]
     fn slope_fit_cost_vs_log2_inv_epsilon() {
@@ -986,7 +980,7 @@ mod tests {
                 let result = synth_mixed_diagonal(theta, eps, seed, false);
                 let mut cost = 0.0;
                 for branch in &result.branches {
-                    let t_count = branch.gates.chars().filter(|&c| c == 'T').count() as f64;
+                    let t_count = branch.gates.t_count() as f64;
                     cost += fbig_to_f64(&branch.weight) * t_count;
                 }
                 total_cost += cost;

@@ -37,7 +37,7 @@ fn main() {
             config_from_theta_epsilon(theta, epsilon, seed, verbose, up_to_phase);
 
         let res = gridsynth_gates(&mut gridsynth_config);
-        let t_count = res.gates.chars().filter(|&c| c == 'T').count();
+        let t_count = res.gates.t_count();
         total_t_count += t_count as u64;
 
         println!("{theta},{t_count}");
