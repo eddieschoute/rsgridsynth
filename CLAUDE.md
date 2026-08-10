@@ -53,6 +53,15 @@ CI (`.github/workflows/main.yml`) runs `make ci` on stable and the pinned MSRV (
 `cargo clippy`/`cargo test`: it also lints `src/main.rs` (only reachable via the `cli` feature)
 and runs the `#[test]` cases embedded in `examples/pauli_transfer_verification.rs`.
 
+## Tooling
+
+Prefer LSP (rust-analyzer) over grep for navigating this crate: `documentSymbol` gives instant,
+signature-complete outlines of a file (works immediately, no indexing wait) and `goToDefinition`/
+`findReferences` jump across the ring/region/gate types accurately. Note `findReferences` and
+`workspaceSymbol` need rust-analyzer to finish indexing the workspace first — they return "no
+results" rather than erroring while that's in progress (noticeable right after opening a fresh
+worktree), so fall back to `grep` if they come back empty and you're not sure indexing is done.
+
 ## Architecture
 
 The crate implements one pipeline: angle+tolerance in → exact Clifford+T gate sequence
