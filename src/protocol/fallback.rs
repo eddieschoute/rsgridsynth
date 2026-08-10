@@ -43,6 +43,33 @@ use dashu_int::IBig;
 
 use nalgebra::{Matrix2, Vector2};
 
+/// `(cos(phi), sin(phi), |v|^2)` for `phi = Arg(v)`, where `v` is a projective candidate's
+/// off-diagonal `w` entry. Degenerate case: `v = 0` exactly (the projective candidate is an
+/// exact diagonal unitary, i.e. `|z|^2 = 1` and the success probability is already 1) makes
+/// `Arg(v)` undefined and the naive `re_v / |v|` division panic (dashu-int's "divisor must
+/// not be 0"). Since the correction branch is then never selected (its weight is
+/// `1 - achieved_success_probability() = 0`), any convention for `phi` is equally valid;
+/// `phi = 0` is used so the residual angle collapses to `theta` itself. The returned `|v|^2`
+/// is likewise substituted with `1` (rather than the true `0`) so callers that scale a
+/// correction-search epsilon budget by `1 / |v|^2` (irrelevant in this branch, since the
+/// correction is never used) don't divide by zero either.
+pub(crate) fn phase_cos_sin(v: &DOmega) -> (FBig<HalfEven>, FBig<HalfEven>, FBig<HalfEven>) {
+    let re_v = v.real().clone();
+    let im_v = v.imag().clone();
+    let v_norm_sq = fb_with_prec(fb_with_prec(&re_v * &re_v) + fb_with_prec(&im_v * &im_v));
+    if v_norm_sq.repr().is_zero() {
+        return (
+            ib_to_bf_prec(IBig::ONE),
+            ib_to_bf_prec(IBig::ZERO),
+            ib_to_bf_prec(IBig::ONE),
+        );
+    }
+    let v_norm = sqrt_fbig(&v_norm_sq);
+    let cos_phi = fb_with_prec(&re_v / &v_norm);
+    let sin_phi = fb_with_prec(&im_v / &v_norm);
+    (cos_phi, sin_phi, v_norm_sq)
+}
+
 fn to_fbig(x: f64) -> FBig<HalfEven> {
     FBig::<HalfEven>::try_from(x)
         .unwrap()
@@ -404,12 +431,7 @@ impl FallbackResult {
 /// correction, e.g. mixed fallback's).
 pub(crate) fn residual_wframe(theta: &FBig<HalfEven>, projective_gates: &[Gate]) -> WFrame {
     let v = DOmegaUnitary::from_gates(projective_gates).w().clone();
-    let re_v = v.real().clone();
-    let im_v = v.imag().clone();
-    let v_norm_sq = fb_with_prec(fb_with_prec(&re_v * &re_v) + fb_with_prec(&im_v * &im_v));
-    let v_norm = sqrt_fbig(&v_norm_sq);
-    let cos_phi = fb_with_prec(&re_v / &v_norm);
-    let sin_phi = fb_with_prec(&im_v / &v_norm);
+    let (cos_phi, sin_phi, _) = phase_cos_sin(&v);
     let (cos_half_phi, sin_half_phi) = half_angle_cos_sin(&cos_phi, &sin_phi);
 
     let two = to_fbig(2.0);
@@ -545,12 +567,7 @@ pub fn synth_fallback(
 
     // Correction step: residual angle theta_B = theta - Arg(v), via the half-angle algebra
     // derived in this module's docs (avoids atan2).
-    let re_v = v.real().clone();
-    let im_v = v.imag().clone();
-    let v_norm_sq = fb_with_prec(fb_with_prec(&re_v * &re_v) + fb_with_prec(&im_v * &im_v));
-    let v_norm = sqrt_fbig(&v_norm_sq);
-    let cos_phi = fb_with_prec(&re_v / &v_norm);
-    let sin_phi = fb_with_prec(&im_v / &v_norm);
+    let (cos_phi, sin_phi, v_norm_sq) = phase_cos_sin(&v);
     let (cos_half_phi, sin_half_phi) = half_angle_cos_sin(&cos_phi, &sin_phi);
 
     let two = to_fbig(2.0);

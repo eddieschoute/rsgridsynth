@@ -39,7 +39,9 @@ use crate::config::{config_from_theta_epsilon, GridSynthConfig};
 use crate::gate::{Gate, GateSeq};
 use crate::gridsynth::{setup_regions_and_transform, UnitDisk};
 use crate::math::sqrt_fbig;
-use crate::protocol::fallback::{half_angle_cos_sin, residual_diamond_error_mixed, SectorRegion};
+use crate::protocol::fallback::{
+    half_angle_cos_sin, phase_cos_sin, residual_diamond_error_mixed, SectorRegion,
+};
 use crate::protocol::mixed_diagonal::{
     assemble_result, search_for_straddling_pair, MixedDiagonalRegion, MixedDiagonalResult,
     StraddleOutcome,
@@ -204,8 +206,9 @@ impl AchievedDiamondError for MixedFallbackResult {
     }
 }
 
-/// `q * scale`'s exact real square root, as an `FBig` -- shared helper for the two sides'
-/// residual-angle derivation, avoiding recomputing `sqrt_fbig` on the same value twice.
+/// Builds one side (under- or over-rotation) of a mixed-fallback result: decomposes the
+/// projective candidate to gates, derives the residual angle theta_B, and searches for that
+/// residual's mixed-diagonal correction.
 fn build_side(
     projective_unitary: DOmegaUnitary,
     theta_z_x: &FBig<HalfEven>,
@@ -220,13 +223,9 @@ fn build_side(
     // `fallback::synth_fallback` uses: cos(-theta_B/2) = cos(-theta/2)*cos(phi/2) -
     // sin(-theta/2)*sin(phi/2), sin(-theta_B/2) = sin(-theta/2)*cos(phi/2) +
     // cos(-theta/2)*sin(phi/2), with (cos(phi/2), sin(phi/2)) from half_angle_cos_sin applied
-    // to (cos(phi), sin(phi)) = (Re(v), Im(v)) / |v|.
-    let re_v = v.real().clone();
-    let im_v = v.imag().clone();
-    let v_norm_sq = fb_with_prec(fb_with_prec(&re_v * &re_v) + fb_with_prec(&im_v * &im_v));
-    let v_norm = sqrt_fbig(&v_norm_sq);
-    let cos_phi = fb_with_prec(&re_v / &v_norm);
-    let sin_phi = fb_with_prec(&im_v / &v_norm);
+    // to (cos(phi), sin(phi)) = (Re(v), Im(v)) / |v| (see `phase_cos_sin`'s docs for the
+    // degenerate `v = 0` case).
+    let (cos_phi, sin_phi, v_norm_sq) = phase_cos_sin(&v);
     let (cos_half_phi, sin_half_phi) = half_angle_cos_sin(&cos_phi, &sin_phi);
 
     let cos_neg_theta_b_half = fb_with_prec(
