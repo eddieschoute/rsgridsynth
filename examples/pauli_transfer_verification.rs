@@ -72,6 +72,7 @@ use dashu_base::{Abs, Approximation};
 use dashu_float::round::mode::HalfEven;
 use dashu_float::FBig;
 use dashu_int::IBig;
+use num::Complex;
 use rsgridsynth::clear_caches;
 use rsgridsynth::common::{cos_fbig, fb_with_prec, ib_to_bf_prec, sin_fbig};
 use rsgridsynth::math::{sign, sqrt_fbig};
@@ -135,62 +136,30 @@ fn fneg(a: &Fb) -> Fb {
     -fb_with_prec(a.clone())
 }
 
-/// Arbitrary-precision complex number, replacing `num::Complex<f64>` for every quantity that
-/// feeds into a pass/fail budget decision (see module docs).
-#[derive(Clone)]
-struct Cx {
-    re: Fb,
-    im: Fb,
+/// Arbitrary-precision complex number. `+`/`-`/`*`/[`Complex::conj`]/[`Complex::scale`]/
+/// [`Complex::norm_sqr`] all come from `num::Complex<Fb>`'s own generic impls (it only requires
+/// `Fb: Clone + Num`, which `FBig` satisfies -- see issue #16); only the precision-aware zero/
+/// real/magnitude helpers below are crate-specific, since `Complex::zero()`'s `Fb::zero()` would
+/// build an unbounded-precision `FBig::ZERO` rather than one pinned to the working `PREC_BITS`
+/// context (see `fzero`/`ib_to_bf_prec`).
+type Cx = Complex<Fb>;
+
+fn cx_zero() -> Cx {
+    Cx::new(fzero(), fzero())
 }
 
-impl Cx {
-    fn new(re: Fb, im: Fb) -> Self {
-        Self { re, im }
-    }
+fn cx_real(x: Fb) -> Cx {
+    Cx::new(x, fzero())
+}
 
-    fn zero() -> Self {
-        Self::new(fzero(), fzero())
-    }
-
-    fn real(x: Fb) -> Self {
-        Self::new(x, fzero())
-    }
-
-    fn add(&self, o: &Cx) -> Cx {
-        Cx::new(fadd(&self.re, &o.re), fadd(&self.im, &o.im))
-    }
-
-    fn sub(&self, o: &Cx) -> Cx {
-        Cx::new(fsub(&self.re, &o.re), fsub(&self.im, &o.im))
-    }
-
-    fn mul(&self, o: &Cx) -> Cx {
-        let re = fsub(&fmul(&self.re, &o.re), &fmul(&self.im, &o.im));
-        let im = fadd(&fmul(&self.re, &o.im), &fmul(&self.im, &o.re));
-        Cx::new(re, im)
-    }
-
-    fn conj(&self) -> Cx {
-        Cx::new(self.re.clone(), fneg(&self.im))
-    }
-
-    fn scale(&self, s: &Fb) -> Cx {
-        Cx::new(fmul(&self.re, s), fmul(&self.im, s))
-    }
-
-    fn norm_sq(&self) -> Fb {
-        fadd(&fmul(&self.re, &self.re), &fmul(&self.im, &self.im))
-    }
-
-    fn abs(&self) -> Fb {
-        sqrt_fbig(&self.norm_sq())
-    }
+fn cx_abs(z: &Cx) -> Fb {
+    sqrt_fbig(&z.norm_sqr())
 }
 
 type M2 = [[Cx; 2]; 2];
 
 fn zero_m2() -> M2 {
-    std::array::from_fn(|_| std::array::from_fn(|_| Cx::zero()))
+    std::array::from_fn(|_| std::array::from_fn(|_| cx_zero()))
 }
 
 fn zero_mat4() -> [[Fb; 4]; 4] {
@@ -215,9 +184,9 @@ fn mat_mul(a: &M2, b: &M2) -> M2 {
     let mut r = zero_m2();
     for i in 0..2 {
         for j in 0..2 {
-            let mut s = Cx::zero();
+            let mut s = cx_zero();
             for k in 0..2 {
-                s = s.add(&a[i][k].mul(&b[k][j]));
+                s = &s + &(&a[i][k] * &b[k][j]);
             }
             r[i][j] = s;
         }
@@ -233,9 +202,9 @@ fn mat_dagger(a: &M2) -> M2 {
 }
 
 fn pauli_basis() -> [M2; 4] {
-    let zero = Cx::zero();
-    let one = Cx::real(fone());
-    let neg_one = Cx::real(fneg(&fone()));
+    let zero = cx_zero();
+    let one = cx_real(fone());
+    let neg_one = cx_real(fneg(&fone()));
     let i_val = Cx::new(fzero(), fone());
     let neg_i = Cx::new(fzero(), fneg(&fone()));
     let id = [[one.clone(), zero.clone()], [zero.clone(), one.clone()]];
@@ -258,13 +227,13 @@ fn ptm(branches: &[(Fb, M2)]) -> [[Fb; 4]; 4] {
             let term = mat_mul(&mat_mul(u, sq), &u_dagger);
             for i in 0..2 {
                 for j in 0..2 {
-                    lambda_sq[i][j] = lambda_sq[i][j].add(&term[i][j].scale(weight));
+                    lambda_sq[i][j] = &lambda_sq[i][j] + &term[i][j].scale(weight.clone());
                 }
             }
         }
         for (p_idx, sp) in sigma.iter().enumerate() {
             let prod = mat_mul(sp, &lambda_sq);
-            let trace = prod[0][0].add(&prod[1][1]);
+            let trace = &prod[0][0] + &prod[1][1];
             r[p_idx][q_idx] = fmul(&half, &trace.re);
         }
     }
@@ -277,7 +246,7 @@ fn ptm(branches: &[(Fb, M2)]) -> [[Fb; 4]; 4] {
 /// `theta` to hand to `cos_fbig`/`sin_fbig`, e.g. `theta - Arg(v)`) can reuse it -- see
 /// `residual_cos_sin`/`half_angle_cos_sin`.
 fn target_matrix_from_half(cos_half: &Fb, sin_half: &Fb) -> M2 {
-    let zero = Cx::zero();
+    let zero = cx_zero();
     [
         [Cx::new(cos_half.clone(), fneg(sin_half)), zero.clone()],
         [zero, Cx::new(cos_half.clone(), sin_half.clone())],
@@ -391,7 +360,7 @@ fn half_angle_cos_sin(cos_phi: &Fb, sin_phi: &Fb) -> (Fb, Fb) {
 /// `(cos(Arg v), sin(Arg v)) = (Re(v), Im(v)) / |v|` -- no `atan2` needed, `Arg(v)` itself is
 /// never materialized as a number.
 fn residual_cos_sin(theta: &Fb, v: &Cx) -> (Fb, Fb) {
-    let norm = sqrt_fbig(&v.norm_sq());
+    let norm = sqrt_fbig(&v.norm_sqr());
     let inv_norm = fdiv(&fone(), &norm);
     let cos_argv = fmul(&v.re, &inv_norm);
     let sin_argv = fmul(&v.im, &inv_norm);
@@ -415,8 +384,8 @@ fn residual_cos_sin(theta: &Fb, v: &Cx) -> (Fb, Fb) {
 /// had, caught by comparing against `plain_diagonal_epsilon_convention_calibration`'s
 /// epsilon-scaling expectation.
 fn single_rotation_diamond_distance(z: &Cx, theta: &Fb) -> Fb {
-    let norm = sqrt_fbig(&z.norm_sq());
-    let phase = z.scale(&fdiv(&fone(), &norm));
+    let norm = sqrt_fbig(&z.norm_sqr());
+    let phase = z.scale(fdiv(&fone(), &norm));
     let two = ib_to_bf_prec(IBig::from(2));
     let half = fdiv(theta, &two);
     let c = cos_fbig(&half);
@@ -430,8 +399,8 @@ fn single_rotation_diamond_distance(z: &Cx, theta: &Fb) -> Fb {
 /// norm, no square root) rather than normalizing `z` first and squaring -- one fewer
 /// transcendental step, and avoids ever computing `Arg(z)` as a number (see module docs).
 fn phase_sq_from_z(z: &Cx) -> Cx {
-    let inv_norm_sq = fdiv(&fone(), &z.norm_sq());
-    z.mul(z).scale(&inv_norm_sq)
+    let inv_norm_sq = fdiv(&fone(), &z.norm_sqr());
+    (z * z).scale(inv_norm_sq)
 }
 
 /// Exact diamond distance of a weighted combination of same-axis (Z-)rotations minus a
@@ -456,13 +425,13 @@ fn phase_sq_from_z(z: &Cx) -> Cx {
 /// naive triangle-inequality bound on the two branches SEPARATELY (an earlier version of this
 /// check) is too loose to see the cancellation at all, and wrongly looks like a failure.
 fn rotation_mixture_diamond_distance(weighted_phase_sq: &[(Fb, Cx)], theta: &Fb) -> Fb {
-    let mut c = Cx::zero();
+    let mut c = cx_zero();
     let target_phase = Cx::new(cos_fbig(theta), fneg(&sin_fbig(theta))); // e^{-i*theta}
     for (w, phase_sq) in weighted_phase_sq {
-        let diff = phase_sq.sub(&target_phase);
-        c = c.add(&diff.scale(w));
+        let diff = phase_sq - &target_phase;
+        c = &c + &diff.scale(w.clone());
     }
-    c.abs()
+    cx_abs(&c)
 }
 
 fn mixed_diagonal_pauli_branches(result: &MixedDiagonalResult) -> Vec<(Fb, M2)> {
@@ -729,10 +698,7 @@ mod debug_tests {
     fn identity_channel_vs_target_theta_zero() {
         reset_prec_bits();
         let theta = to_fbig(0.0_f64);
-        let id = [
-            [Cx::real(fone()), Cx::zero()],
-            [Cx::zero(), Cx::real(fone())],
-        ];
+        let id = [[cx_real(fone()), cx_zero()], [cx_zero(), cx_real(fone())]];
         let (dd, max_od) = pauli_diamond_distance_from_branches(&[(fone(), id)], &theta);
         eprintln!("dd={}, max_od={}", to_f64(&dd), to_f64(&max_od));
         assert!(

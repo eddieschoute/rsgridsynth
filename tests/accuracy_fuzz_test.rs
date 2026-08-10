@@ -60,9 +60,7 @@ fn independent_operator_error(gates: &[Gate], theta: &FBig<HalfEven>, shifted: b
     if shifted {
         let p = to_fbig(std::f64::consts::PI / 8.);
         let phase = Complex::new(cos_fbig(&p), sin_fbig(&p));
-        let re = &u.re * &phase.re - &u.im * &phase.im;
-        let im = &u.re * &phase.im + &u.im * &phase.re;
-        u = Complex::new(re, im);
+        u = &u * &phase;
     }
 
     // Squared operator norm of (expected - synthesized), via the shared eigenvalue formula:

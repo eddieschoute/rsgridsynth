@@ -22,6 +22,7 @@ use crate::unitary::DOmegaUnitary;
 use dashu_float::round::mode::HalfEven;
 use dashu_float::FBig;
 use dashu_int::IBig;
+use num::Complex;
 
 /// The rotated-frame projection used to measure rotation error against a target angle
 /// `theta`. Given a candidate unitary's top-left entry `u`, defines
@@ -122,12 +123,10 @@ pub(crate) fn gate_seq_diamond_error(
 
     let re_w = if extra_eighth_turn {
         let p = fb_with_prec(FBig::<HalfEven>::try_from(std::f64::consts::PI / 8.).unwrap());
-        let (cos_p, sin_p) = (fb_with_prec(cos_fbig(&p)), fb_with_prec(sin_fbig(&p)));
-        let (re, im) = (u.z().real(), u.z().imag());
-        // (re + i*im) * (cos_p + i*sin_p)
-        let shifted_re = fb_with_prec(fb_with_prec(re * &cos_p) - fb_with_prec(im * &sin_p));
-        let shifted_im = fb_with_prec(fb_with_prec(re * &sin_p) + fb_with_prec(im * &cos_p));
-        wframe.re_w_fbig(&shifted_re, &shifted_im)
+        let phase = Complex::new(fb_with_prec(cos_fbig(&p)), fb_with_prec(sin_fbig(&p)));
+        let z = Complex::new(u.z().real().clone(), u.z().imag().clone());
+        let shifted = &z * &phase;
+        wframe.re_w_fbig(&shifted.re, &shifted.im)
     } else {
         wframe.re_w(u.z())
     };
