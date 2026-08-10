@@ -13,16 +13,30 @@ It ships as both a library (`rsgridsynth::*`) and an optional CLI binary.
 
 ## Commands
 
-```bash
-# Build the library (no CLI, default feature set)
-cargo build
+A `Makefile` at the repo root wraps the commands below (`make help` lists all targets). It has no
+dependencies beyond `cargo`/`rustup` — this is a plain GNU Makefile, not `cargo-make`.
 
-# Build/run the CLI binary — requires the `cli` feature (clap is optional behind it)
-cargo build --bin rsgridsynth -F cli --release
+```bash
+# Show all available targets
+make help
+
+# Build the library (no CLI, default feature set)
+make build           # == cargo build
+
+# Build the release CLI binary — requires the `cli` feature (clap is optional behind it)
+make build-cli        # == cargo build --bin rsgridsynth -F cli --release
 ./target/release/rsgridsynth <theta> <epsilon> [-v] [-t] [-p] [--error]
 
-# Run all tests (unit tests in src/, integration tests in tests/)
-cargo test
+# Lint and test — same flags CI runs
+make fmt-check         # == cargo fmt --all -- --check
+make clippy            # == cargo clippy --all-features --all-targets -- -D warnings
+make test              # == cargo test --all-features --all-targets && cargo test --all-features --doc
+
+# The full CI gate, in one command
+make ci                # == fmt-check + clippy + test
+
+# Reformat in place (writes files; not run in CI)
+make fmt                # == cargo fmt --all
 
 # Run a single integration test
 cargo test --test integration_test simple_test -- --exact
@@ -30,16 +44,14 @@ cargo test --test integration_test simple_test -- --exact
 # Run a single unit test (module-scoped, e.g. in src/common.rs)
 cargo test --lib common::tests::test_sin_fbig_random -- --exact
 
-# Lint (both are enforced in CI — clippy warnings are errors)
-cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
-
 # Run the example binary showing library usage
 cargo run --example interface
 ```
 
-CI (`.github/workflows/main.yml`) runs the above build/fmt/clippy/test sequence on stable and the pinned
-MSRV (1.87).
+CI (`.github/workflows/main.yml`) runs `make ci` on stable and the pinned MSRV (1.87).
+`make clippy`/`make test` use `--all-features --all-targets`, which is broader than a bare
+`cargo clippy`/`cargo test`: it also lints `src/main.rs` (only reachable via the `cli` feature)
+and runs the `#[test]` cases embedded in `examples/pauli_transfer_verification.rs`.
 
 ## Architecture
 
