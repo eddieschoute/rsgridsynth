@@ -224,6 +224,18 @@ impl NormalForm {
     pub fn t_count(&self) -> usize {
         self.syllables.iter().filter(|s| **s != Syllable::I).count()
     }
+
+    /// The T-rotation syllables, in application order, matching the grammar `T?(HT|SHT)*`:
+    /// a bare `Syllable::T` can only occur as the first element (`append_gate` merges any
+    /// later `Axis::I` case into the preceding syllable instead of pushing a second one).
+    pub fn syllables(&self) -> &[Syllable] {
+        &self.syllables
+    }
+
+    /// The trailing Clifford correction (`Clifford` is `Copy`).
+    pub fn clifford(&self) -> Clifford {
+        self.c
+    }
 }
 
 impl Default for NormalForm {
