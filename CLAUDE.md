@@ -103,11 +103,15 @@ precision the previous call left behind. This is also why `tests/integration_tes
 The binary (`src/main.rs`) is gated behind the `cli` feature (`required-features = ["cli"]`), which
 pulls in `clap`; plain `cargo build`/`cargo check` only builds the library. Library callers should go
 through `config::config_from_theta_epsilon(theta, epsilon, seed, verbose, up_to_phase)` →
-`gridsynth::gridsynth_gates(&mut config)` → `GridSynthResult { gates, global_phase, error, is_correct }`,
-as in `examples/interface.rs`. `theta`/`epsilon` on the CLI are parsed with a custom decimal+exponent
-parser (`config::parse_decimal_with_exponent`) rather than through `f64`, since `f64` cannot represent
-the arbitrary decimal precision (`--dps`) the algorithm can target; per the README, precision beyond
-`1e-8` is not yet fully supported.
+`gridsynth::gridsynth_gates(&mut config)` → `GridSynthResult { gates, global_phase }`, as in
+`examples/interface.rs`. Accuracy is not cached eagerly on the result; call
+`achieved_diamond_error(theta)` (the `accuracy::AchievedDiamondError` trait, implemented for
+`GridSynthResult` and the `protocol::*` result types) to recompute it on demand from the gate
+string. `theta`/`epsilon` on the CLI are parsed with a custom decimal+exponent parser
+(`config::parse_decimal_with_exponent`) rather than through `f64`, since `f64` cannot represent the
+arbitrary decimal precision (`--dps`) the algorithm can target; the library's `f64`-based
+`config_from_theta_epsilon` entry point has been fuzz-tested for accuracy down to `epsilon = 1e-15`
+(see `tests/accuracy_fuzz_test.rs`).
 
 ### Phase modes
 

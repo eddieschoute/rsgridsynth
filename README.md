@@ -26,7 +26,7 @@ cargo build --bin rsgridsynth -F cli --release
 ```
 
 * `<theta>`: The rotation angle in radians (e.g. `0.6`)
-* `<epsilon>`: The target approximation error(still do not support precision higher than 1e-8.) (e.g. `1e-8`)
+* `<epsilon>`: The target approximation error (e.g. `1e-8`); accuracy is fuzz-tested down to `1e-15`
 
 ### Options
 
