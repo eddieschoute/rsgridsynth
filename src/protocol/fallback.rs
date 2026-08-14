@@ -425,9 +425,10 @@ impl FallbackResult {
 /// Builds the [`WFrame`] for the *residual* target rotation `theta - Arg(v)` that a
 /// projective step's correction actually approximates -- `v` decoded from `projective_gates`'s
 /// own off-diagonal (`w`) entry, via the same `atan2`-free half-angle algebra
-/// [`synth_fallback`] uses to derive that residual angle in the first place. Shared by
-/// [`residual_diamond_error`] (a single correction gate string) and (once the mixed-fallback
-/// protocol lands) an analogous helper for `MixedDiagonalResult` corrections.
+/// [`synth_fallback`]/[`crate::protocol::mixed_fallback::build_side`] use to derive that
+/// residual angle in the first place. Shared by [`residual_diamond_error`] (a single
+/// correction gate string) and [`residual_diamond_error_mixed`] (a `MixedDiagonalResult`
+/// correction, e.g. mixed fallback's).
 pub(crate) fn residual_wframe(theta: &FBig<HalfEven>, projective_gates: &[Gate]) -> WFrame {
     let v = DOmegaUnitary::from_gates(projective_gates).w().clone();
     let (cos_phi, sin_phi, _) = phase_cos_sin(&v);
@@ -461,6 +462,22 @@ pub(crate) fn residual_diamond_error(
     let u = DOmegaUnitary::from_gates(correction_gates);
     let re_w = wframe.re_w(u.z());
     diagonal_diamond_distance(&re_w)
+}
+
+/// Like [`residual_diamond_error`], but for a correction that's itself a
+/// [`MixedDiagonalResult`] (mixed fallback's twirled-branch corrections) rather than a single
+/// gate string. Delegates to
+/// [`MixedDiagonalResult::achieved_diamond_error_with_frame`] so the mixture's own quadratic
+/// error cancellation (see that method's docs) is preserved, instead of naively
+/// triangle-inequality-summing each individual branch's (much larger) distance to the
+/// residual target.
+pub(crate) fn residual_diamond_error_mixed(
+    theta: &FBig<HalfEven>,
+    projective_gates: &[Gate],
+    correction: &crate::protocol::mixed_diagonal::MixedDiagonalResult,
+) -> FBig<HalfEven> {
+    let wframe = residual_wframe(theta, projective_gates);
+    correction.achieved_diamond_error_with_frame(&wframe)
 }
 
 impl AchievedDiamondError for FallbackResult {

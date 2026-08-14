@@ -3,6 +3,7 @@
 
 pub mod fallback;
 pub mod mixed_diagonal;
+pub mod mixed_fallback;
 pub mod mixing;
 
 pub use crate::accuracy::AchievedDiamondError;
@@ -16,3 +17,5 @@ pub use mixed_diagonal::{
 };
 
 pub use fallback::{exact_q, synth_fallback, FallbackResult, SectorRegion};
+
+pub use mixed_fallback::{synth_mixed_fallback, MixedFallbackResult, MixedFallbackSide};

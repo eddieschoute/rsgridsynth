@@ -87,6 +87,21 @@ impl MixedDiagonalRegion {
         Self::from_target_direction_impl(z_x, z_y, epsilon, scale)
     }
 
+    /// Builds the same region as [`MixedDiagonalRegion::new`], but from the target
+    /// direction's half-angle `(cos(-phi/2), sin(-phi/2))` directly, avoiding an `atan2`-style
+    /// angle round-trip -- mirrors
+    /// [`crate::gridsynth::EpsilonRegion::from_target_direction`]. Used by "mixed fallback"
+    /// (a later stage) to build a mixed-diagonal *correction* region for a residual angle
+    /// that only exists as an algebraically-derived `(cos, sin)` pair, not a raw `theta`.
+    pub(crate) fn from_target_direction(
+        z_x: FBig<HalfEven>,
+        z_y: FBig<HalfEven>,
+        epsilon: &FBig<HalfEven>,
+        scale: ZRootTwo,
+    ) -> Self {
+        Self::from_target_direction_impl(z_x, z_y, epsilon, scale)
+    }
+
     fn from_target_direction_impl(
         z_x: FBig<HalfEven>,
         z_y: FBig<HalfEven>,

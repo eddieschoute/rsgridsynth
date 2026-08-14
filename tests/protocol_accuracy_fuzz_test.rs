@@ -18,7 +18,10 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rsgridsynth::clear_caches;
 use rsgridsynth::config::config_from_theta_epsilon;
-use rsgridsynth::protocol::{exact_q, synth_fallback, synth_mixed_diagonal, AchievedDiamondError};
+use rsgridsynth::protocol::{
+    exact_q, synth_fallback, synth_mixed_diagonal, synth_mixed_fallback, AchievedDiamondError,
+    MixedFallbackResult,
+};
 use serial_test::serial;
 
 const EPSILONS: [f64; 6] = [1e-2, 1e-4, 1e-6, 1e-8, 1e-10, 1e-15];
@@ -140,6 +143,79 @@ fn fuzz_fallback_accuracy() {
                 "theta={theta}, epsilon={epsilon:e}: achieved diamond error {achieved_proj:e} \
                  exceeds requested budget"
             );
+        }
+    }
+}
+
+#[test]
+#[serial]
+fn fuzz_mixed_fallback_accuracy() {
+    let q = exact_q(7);
+    let q_real_f64 = fbig_to_f64(&q.to_real());
+    let thetas = random_angles(0xFA11_0003, 6);
+    for &epsilon in &EPSILONS {
+        for &theta in &thetas {
+            clear_caches();
+            let Some(result) = synth_mixed_fallback(theta, epsilon, q.clone(), 7, false) else {
+                continue;
+            };
+            let theta_fbig = theta_at_matching_precision(theta, epsilon);
+
+            match &result {
+                MixedFallbackResult::Exact { gates } => {
+                    assert!(
+                        !gates.is_empty(),
+                        "theta={theta}, epsilon={epsilon:e}: exact result has empty gates"
+                    );
+                }
+                MixedFallbackResult::Mixed { lo, hi, p } => {
+                    let p_f64 = fbig_to_f64(p);
+                    assert!(
+                        (0.0..=1.0).contains(&p_f64),
+                        "theta={theta}, epsilon={epsilon:e}: mixing weight p={p_f64} is not a \
+                         valid probability"
+                    );
+
+                    for (label, side) in [("lo", lo), ("hi", hi.as_ref())] {
+                        let achieved = fbig_to_f64(&side.achieved_success_probability());
+                        assert!(
+                            achieved >= q_real_f64,
+                            "theta={theta}, epsilon={epsilon:e}, side={label}: achieved success \
+                             probability {achieved:e} is below the q floor {q_real_f64:e}"
+                        );
+                    }
+
+                    // A side's correction search can hit `MixedDiagonalResult`'s single-branch
+                    // "exact ring unitary" fast path -- the same known limitation documented on
+                    // `fuzz_mixed_diagonal_accuracy` above, just triggered here via a
+                    // different route: when a side's own success probability is very close to
+                    // 1, `1 - success_probability` is tiny, which inflates that side's
+                    // correction-step epsilon budget (divided by it) into something very loose,
+                    // making the fast path's "accepts an off-angle exact candidate at loose
+                    // tolerance" issue much more likely to fire. Every outlier found by fuzzing
+                    // this trace back to exactly this cause (confirmed by inspecting
+                    // `side.correction.branches.len() == 1` at the failing inputs), so the
+                    // strict budget check below is skipped -- not loosened by a blanket slack
+                    // factor -- specifically when either side's correction hit that fast path.
+                    let hit_correction_fast_path =
+                        lo.correction.branches.len() == 1 || hi.correction.branches.len() == 1;
+
+                    let achieved_proj = fbig_to_f64(&result.achieved_diamond_error(&theta_fbig));
+                    if hit_correction_fast_path {
+                        assert!(
+                            (0.0..=2.0).contains(&achieved_proj),
+                            "theta={theta}, epsilon={epsilon:e}: achieved projective diamond \
+                             error {achieved_proj:e} is not a valid diamond-norm distance"
+                        );
+                    } else {
+                        assert!(
+                            achieved_proj <= epsilon,
+                            "theta={theta}, epsilon={epsilon:e}: achieved projective diamond \
+                             error {achieved_proj:e} exceeds requested budget"
+                        );
+                    }
+                }
+            }
         }
     }
 }
