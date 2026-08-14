@@ -9,6 +9,7 @@ use rand::{rngs::StdRng, SeedableRng};
 pub mod common;
 pub mod config;
 pub mod diophantine;
+pub mod gate;
 pub mod grid_op;
 pub mod gridsynth;
 pub mod math;

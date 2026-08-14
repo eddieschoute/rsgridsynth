@@ -4,6 +4,7 @@
 use crate::common::{cos_fbig, fb_with_prec, get_prec_bits, ib_to_bf_prec, sin_fbig};
 use crate::config::{GridSynthConfig, GridSynthResult};
 use crate::diophantine::diophantine_dyadic;
+use crate::gate::GateSeq;
 use crate::math::solve_quadratic;
 use crate::math::sqrt_fbig;
 use crate::region::Ellipse;
@@ -108,7 +109,7 @@ fn to_fbig(x: f64) -> FBig<HalfEven> {
 
 /// Checks correctness of the synthesized circuit.
 fn compute_error(
-    gates: &str,
+    gates: &GateSeq,
     theta: &FBig<HalfEven>,
     epsilon: &FBig<HalfEven>,
     phase: PhaseMode,
@@ -572,12 +573,12 @@ pub fn gridsynth_gates(config: &mut GridSynthConfig) -> GridSynthResult {
         // exact synthesis
         let u_approx = gridsynth(config, PhaseMode::Exact);
         let gates_exact = decompose_domega_unitary(u_approx);
-        let t_count_exact = gates_exact.chars().filter(|&c| c == 'T').count();
+        let t_count_exact = gates_exact.t_count();
 
         // also shifted synthesis
         let u_approx = gridsynth(config, PhaseMode::Shifted);
         let gates_shifted = decompose_domega_unitary(u_approx);
-        let t_count_shifted = gates_shifted.chars().filter(|&c| c == 'T').count();
+        let t_count_shifted = gates_shifted.t_count();
 
         if t_count_exact <= t_count_shifted {
             let (error, is_correct) = match config.compute_error {
