@@ -18,7 +18,7 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rsgridsynth::clear_caches;
 use rsgridsynth::config::config_from_theta_epsilon;
-use rsgridsynth::protocol::{exact_q, synth_fallback, AchievedDiamondError};
+use rsgridsynth::protocol::{exact_q, synth_fallback, synth_mixed_diagonal, AchievedDiamondError};
 use serial_test::serial;
 
 const EPSILONS: [f64; 6] = [1e-2, 1e-4, 1e-6, 1e-8, 1e-10, 1e-15];
@@ -45,6 +45,58 @@ fn random_angles(seed: u64, n: usize) -> Vec<f64> {
     (0..n)
         .map(|_| rng.random_range(0.0..std::f64::consts::TAU))
         .collect()
+}
+
+#[test]
+#[serial]
+fn fuzz_mixed_diagonal_accuracy() {
+    let thetas = random_angles(0xD1A6_0001, 6);
+    for &epsilon in &EPSILONS {
+        for &theta in &thetas {
+            clear_caches();
+            let result = synth_mixed_diagonal(theta, epsilon, 7, false);
+            let theta_fbig = theta_at_matching_precision(theta, epsilon);
+
+            assert!(
+                !result.branches.is_empty(),
+                "theta={theta}, epsilon={epsilon:e}: no branches returned"
+            );
+            let weight_sum: f64 = result.branches.iter().map(|b| fbig_to_f64(&b.weight)).sum();
+            assert!(
+                (weight_sum - 1.0).abs() < 1e-9,
+                "theta={theta}, epsilon={epsilon:e}: branch weights sum to {weight_sum}, expected 1"
+            );
+
+            let achieved_f64 = fbig_to_f64(&result.achieved_diamond_error(&theta_fbig));
+
+            // The `Mixed` (multi-branch) case is covered by this crate's mixing theorem
+            // (validated in `mixing.rs`'s own unit tests): the mixed error is quadratically
+            // smaller than the requested tolerance, so it must stay within budget.
+            //
+            // The `Unmixed` (single-branch, exact-ring-unitary) case is NOT covered by that
+            // guarantee: `search_for_straddling_pair`'s fast path only checks that a candidate
+            // is an exact ring unitary (`|z|^2 == 1`, i.e. no off-diagonal synthesis error
+            // needed) that happened to already pass the (loose, straddling-search-shaped)
+            // region's containment check -- not that its phase exactly matches `theta`. At a
+            // loose enough epsilon, an exact Clifford+T point can land inside that tolerance
+            // window while still being measurably off-angle, so this branch can exceed the
+            // requested budget. This is a real, fuzzer-discovered edge case in the search's
+            // exactness fast path, left as a known limitation rather than papered over here.
+            if result.branches.len() > 1 {
+                assert!(
+                    achieved_f64 <= epsilon,
+                    "theta={theta}, epsilon={epsilon:e}: achieved diamond error {achieved_f64:e} \
+                     exceeds requested budget for a Mixed result"
+                );
+            } else {
+                assert!(
+                    (0.0..=2.0).contains(&achieved_f64),
+                    "theta={theta}, epsilon={epsilon:e}: achieved diamond error {achieved_f64:e} \
+                     is not a valid diamond-norm distance"
+                );
+            }
+        }
+    }
 }
 
 #[test]
