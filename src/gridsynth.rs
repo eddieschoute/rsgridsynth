@@ -1,10 +1,9 @@
 // Copyright (c) 2024-2025 Shun Yamamoto and Nobuyuki Yoshioka, and IBM
 // Licensed under the MIT License. See LICENSE file in the project root for full license information.
 
-use crate::common::{cos_fbig, fb_with_prec, get_prec_bits, ib_to_bf_prec, sin_fbig};
+use crate::common::{cos_fbig, fb_with_prec, ib_to_bf_prec, sin_fbig};
 use crate::config::{GridSynthConfig, GridSynthResult};
 use crate::diophantine::diophantine_dyadic;
-use crate::gate::GateSeq;
 use crate::math::solve_quadratic;
 use crate::math::sqrt_fbig;
 use crate::region::Ellipse;
@@ -14,7 +13,6 @@ use crate::tdgp::solve_tdgp;
 use crate::tdgp::Region;
 use crate::to_upright::to_upright_set_pair;
 use crate::unitary::DOmegaUnitary;
-use dashu_base::{Approximation, SquareRoot};
 use dashu_float::round::mode::HalfEven;
 use dashu_float::FBig;
 use dashu_int::IBig;
@@ -23,7 +21,6 @@ use dashu_int::IBig;
 use log::debug;
 
 use nalgebra::{Matrix2, Vector2};
-use num::Complex;
 use std::cmp::Ordering;
 use std::time::{Duration, Instant};
 
@@ -72,78 +69,6 @@ fn matrix_multiply_2x2(
 pub enum PhaseMode {
     Exact,   // no scaling
     Shifted, // do scaling
-}
-
-fn rotation_mat(theta: &FBig<HalfEven>) -> Matrix2<Complex<FBig<HalfEven>>> {
-    let two = fb_with_prec(FBig::try_from(2.0).unwrap());
-    let theta_half = fb_with_prec(theta / &two);
-    let neg_theta_half = -fb_with_prec(theta_half);
-    let z_x: FBig<HalfEven> = fb_with_prec(cos_fbig(&neg_theta_half));
-    let z_y: FBig<HalfEven> = fb_with_prec(sin_fbig(&neg_theta_half));
-    let neg_z_y: FBig<HalfEven> = -fb_with_prec(z_y.clone());
-    let zero: FBig<HalfEven> = ib_to_bf_prec(IBig::ZERO);
-
-    Matrix2::new(
-        Complex::new(z_x.clone(), z_y.clone()),
-        Complex::new(zero.clone(), zero.clone()),
-        Complex::new(zero.clone(), zero.clone()),
-        Complex::new(z_x.clone(), neg_z_y.clone()),
-    )
-}
-
-fn mult_complex_nums(
-    u: &Complex<FBig<HalfEven>>,
-    v: &Complex<FBig<HalfEven>>,
-) -> Complex<FBig<HalfEven>> {
-    let re = &u.re * &v.re - &u.im * &v.im;
-    let im = &u.re * &v.im + &u.im * &v.re;
-    Complex::new(re, im)
-}
-
-fn to_fbig(x: f64) -> FBig<HalfEven> {
-    FBig::<HalfEven>::try_from(x)
-        .unwrap()
-        .with_precision(get_prec_bits())
-        .value()
-}
-
-/// Checks correctness of the synthesized circuit.
-fn compute_error(
-    gates: &GateSeq,
-    theta: &FBig<HalfEven>,
-    epsilon: &FBig<HalfEven>,
-    phase: PhaseMode,
-) -> (f64, bool) {
-    let expected = rotation_mat(theta);
-    let synthesized = DOmegaUnitary::from_gates(gates).to_complex_matrix();
-
-    // x = e^{-i theta / 2}
-    let x = expected[(0, 0)].clone();
-    let u = match phase {
-        PhaseMode::Exact => synthesized[(0, 0)].clone(),
-        PhaseMode::Shifted => {
-            let p = to_fbig(std::f64::consts::PI / 8.);
-            let phase = Complex::new(cos_fbig(&p), sin_fbig(&p));
-            mult_complex_nums(&synthesized[(0, 0)].clone(), &phase)
-        }
-    };
-
-    // This computes the eigenvalues of A^* A, where A = expected - synthesized.
-    // The operator norm is the square root of this.
-    let eig: FBig<HalfEven> = 2 - 2 * (&x.re * &u.re + &x.im * &u.im);
-
-    // Due to small numerical imprecisions when computing cos(\theta / 2), it may happen that we
-    // get a slightly negative value.
-    let eig = eig.max(FBig::from(0));
-
-    // Compute the norm.
-    let norm = fb_with_prec(eig.sqrt());
-    // High precision is needed only for the synthesis algorithm
-    let fnorm = match norm.to_f64() {
-        Approximation::Inexact(v, _) => v,
-        Approximation::Exact(v) => v,
-    };
-    (fnorm, norm < *epsilon)
 }
 
 #[derive(Debug)]
@@ -553,21 +478,9 @@ pub fn gridsynth_gates(config: &mut GridSynthConfig) -> GridSynthResult {
         let u_approx = gridsynth(config, PhaseMode::Exact);
         let gates = decompose_domega_unitary(u_approx);
 
-        // Perform validation check, if required.
-        let (error, is_correct) = match config.compute_error {
-            true => {
-                let (e, is_ok) =
-                    compute_error(&gates, &config.theta, &config.epsilon, PhaseMode::Exact);
-                (Some(e), Some(is_ok))
-            }
-            false => (None, None),
-        };
-
         GridSynthResult {
             gates,
             global_phase: false,
-            error,
-            is_correct,
         }
     } else {
         // exact synthesis
@@ -581,45 +494,24 @@ pub fn gridsynth_gates(config: &mut GridSynthConfig) -> GridSynthResult {
         let t_count_shifted = gates_shifted.t_count();
 
         if t_count_exact <= t_count_shifted {
-            let (error, is_correct) = match config.compute_error {
-                true => {
-                    let (e, is_ok) = compute_error(
-                        &gates_exact,
-                        &config.theta,
-                        &config.epsilon,
-                        PhaseMode::Exact,
-                    );
-                    (Some(e), Some(is_ok))
-                }
-                false => (None, None),
-            };
-
             GridSynthResult {
                 gates: gates_exact,
                 global_phase: false,
-                error,
-                is_correct,
             }
         } else {
-            let (error, is_correct) = match config.compute_error {
-                true => {
-                    let (e, is_ok) = compute_error(
-                        &gates_shifted,
-                        &config.theta,
-                        &config.epsilon,
-                        PhaseMode::Shifted,
-                    );
-                    (Some(e), Some(is_ok))
-                }
-                false => (None, None),
-            };
-
             GridSynthResult {
                 gates: gates_shifted,
                 global_phase: true,
-                error,
-                is_correct,
             }
         }
+    }
+}
+
+impl crate::accuracy::AchievedDiamondError for GridSynthResult {
+    /// Diamond-norm distance between this result's synthesized channel and the ideal
+    /// Z-rotation by `theta`, decoded on demand from `self.gates` (accounting for the extra
+    /// `e^{i pi/8}` phase `self.global_phase` records having been used, per `PhaseMode`).
+    fn achieved_diamond_error(&self, theta: &FBig<HalfEven>) -> FBig<HalfEven> {
+        crate::accuracy::gate_seq_diamond_error(theta, &self.gates, self.global_phase)
     }
 }
