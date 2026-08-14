@@ -11,6 +11,7 @@ pub mod gridsynth;
 pub mod math;
 pub mod normal_form;
 pub mod odgp;
+pub mod protocol;
 pub mod region;
 pub mod ring;
 pub mod synthesis_of_clifford_t;
