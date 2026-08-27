@@ -120,33 +120,33 @@ impl MixedDiagonalRegion {
         let two = prec.fb(FBig::try_from(2.0).unwrap());
         let one = prec.ib(IBig::ONE);
         let zero = prec.ib(IBig::ZERO);
-        let half_eps = prec.fb(epsilon / &two);
+        let half_eps = epsilon / &two;
         // `epsilon` >= 2 (e.g. a derived, rescaled correction-step epsilon on a
         // near-degenerate candidate, as in `mixed_fallback::build_side`) is already past the
         // point where any point of the disk fails to qualify; the sane mathematical limit of
         // the formula below is `one_minus_half_eps = 0`, not a negative radicand. Clamp
         // rather than let that panic in `sqrt_fbig`, matching the analogous clamp in
         // `gridsynth::EpsilonRegion::from_target_direction_impl`.
-        let one_minus_half_eps = prec.fb(&one - &half_eps).max(zero.clone());
+        let one_minus_half_eps = (&one - &half_eps).max(zero.clone());
         let scale_to_real = scale.to_real(prec);
 
         // Exact offset, radial semi-axis, and tangential semi-axis -- see struct docs.
         let sqrt_s = sqrt_fbig(prec, &scale_to_real);
         let sqrt_one_minus_half_eps = sqrt_fbig(prec, &one_minus_half_eps);
-        let d = prec.fb(&sqrt_s * &sqrt_one_minus_half_eps);
-        let h = prec.fb(&sqrt_s - &d);
-        let s_half_eps = prec.fb(&scale_to_real * &half_eps);
+        let d = &sqrt_s * &sqrt_one_minus_half_eps;
+        let h = &sqrt_s - &d;
+        let s_half_eps = &scale_to_real * &half_eps;
         let c = sqrt_fbig(prec, &s_half_eps);
 
-        let h_sq = prec.fb(&h * &h);
-        let c_sq = prec.fb(&c * &c);
-        let inv_h_sq = prec.fb(&one / &h_sq);
-        let inv_c_sq = prec.fb(&one / &c_sq);
+        let h_sq = &h * &h;
+        let c_sq = &c * &c;
+        let inv_h_sq = &one / &h_sq;
+        let inv_c_sq = &one / &c_sq;
 
         // Same d1/d2/d3 matrix-product pattern as `EpsilonRegion::new`: d1/d3 rotate into and
         // out of the (radial, tangential) frame, d2 is the diagonal quadratic form in that
         // frame with the radial (thinner) direction first.
-        let neg_z_y: FBig<HalfEven> = -prec.fb(z_y.clone());
+        let neg_z_y: FBig<HalfEven> = -(z_y.clone());
         let d1: Matrix2<FBig<HalfEven>> =
             Matrix2::new(z_x.clone(), neg_z_y.clone(), z_y.clone(), z_x.clone());
         let d2: Matrix2<FBig<HalfEven>> =
@@ -154,8 +154,8 @@ impl MixedDiagonalRegion {
         let d3: Matrix2<FBig<HalfEven>> =
             Matrix2::new(z_x.clone(), z_y.clone(), neg_z_y, z_x.clone());
 
-        let px = prec.fb(&d * &z_x);
-        let py = prec.fb(&d * &z_y);
+        let px = &d * &z_x;
+        let py = &d * &z_y;
         let p = Vector2::new(px, py);
         let m1: Matrix2<FBig<HalfEven>> = matrix_multiply_2x2(prec, &d1, &d2);
         let m: Matrix2<FBig<HalfEven>> = matrix_multiply_2x2(prec, &m1, &d3);
@@ -179,9 +179,9 @@ impl Region for MixedDiagonalRegion {
 
     fn inside(&self, u: &DOmega) -> bool {
         let prec = self.prec;
-        let cos_term1 = prec.fb(&self.z_x * u.real(prec));
-        let cos_term2 = prec.fb(&self.z_y * u.imag(prec));
-        let cos_similarity = prec.fb(&cos_term1 + &cos_term2);
+        let cos_term1 = &self.z_x * u.real(prec);
+        let cos_term2 = &self.z_y * u.imag(prec);
+        let cos_similarity = &cos_term1 + &cos_term2;
 
         DRootTwo::from_domega(u.conj() * u) <= DRootTwo::from_zroottwo(self.scale.clone())
             && cos_similarity >= self.d
@@ -192,23 +192,23 @@ impl Region for MixedDiagonalRegion {
         let a = v.conj() * v;
         let b = 2 * (v.conj() * u0);
         let c = u0.conj() * u0 - DOmega::from_zroottwo(&self.scale);
-        let vz_term1 = prec.fb(&self.z_x * v.real(prec));
-        let vz_term2 = prec.fb(&self.z_y * v.imag(prec));
-        let vz = prec.fb(&vz_term1 + &vz_term2);
+        let vz_term1 = &self.z_x * v.real(prec);
+        let vz_term2 = &self.z_y * v.imag(prec);
+        let vz = &vz_term1 + &vz_term2;
 
-        let term1 = prec.fb(&self.z_x * u0.real(prec));
-        let term2 = prec.fb(&self.z_y * u0.imag(prec));
-        let temp_sub = prec.fb(&self.d - &term1);
-        let rhs = prec.fb(&temp_sub - &term2);
+        let term1 = &self.z_x * u0.real(prec);
+        let term2 = &self.z_y * u0.imag(prec);
+        let temp_sub = &self.d - &term1;
+        let rhs = &temp_sub - &term2;
         // t0 <= t1
         let (t0, t1) = solve_quadratic(prec, a.real(prec), b.real(prec), c.real(prec))?;
-        let zero = prec.fb(prec.ib(IBig::ZERO));
+        let zero = prec.ib(IBig::ZERO);
 
         if vz > zero {
-            let t2 = prec.fb(&rhs / &vz);
+            let t2 = &rhs / &vz;
             Some(if t0 > t2 { (t0, t1) } else { (t2, t1) })
         } else if vz < zero {
-            let t2 = prec.fb(&rhs / &vz);
+            let t2 = &rhs / &vz;
             Some(if t1 < t2 { (t0, t1) } else { (t0, t2) })
         } else if rhs <= zero {
             Some((t0, t1))
@@ -544,9 +544,9 @@ pub(crate) fn assemble_result(
 
             let one = prec.ib(IBig::ONE);
             let four = prec.fb(FBig::try_from(4.0).unwrap());
-            let one_minus_p = prec.fb(&one - &mw.p);
-            let p_over_4 = prec.fb(&mw.p / &four);
-            let one_minus_p_over_4 = prec.fb(&one_minus_p / &four);
+            let one_minus_p = &one - &mw.p;
+            let p_over_4 = &mw.p / &four;
+            let one_minus_p_over_4 = &one_minus_p / &four;
 
             // Decompose the untwirled candidate once per side and cheaply relabel the other
             // three variants (`relabel_by_twirl`), instead of independently re-running
@@ -707,26 +707,20 @@ mod tests {
         let region = MixedDiagonalRegion::new(PREC, &theta, &epsilon, scale.clone());
 
         let two = to_fbig(PREC, 2.0);
-        let half_eps = PREC.fb(&epsilon / &two);
+        let half_eps = &epsilon / &two;
         let scale_to_real = scale.to_real(PREC);
         let sqrt_s = sqrt_fbig(PREC, &scale_to_real);
-        let c = sqrt_fbig(PREC, &PREC.fb(&scale_to_real * &half_eps));
+        let c = sqrt_fbig(PREC, &(&scale_to_real * &half_eps));
 
         let d = region.d.clone();
         let z_x = region.z_x.clone();
         let z_y = region.z_y.clone();
 
         // Chord endpoints: (z_x*d -/+ z_y*c, z_y*d +/- z_x*c).
-        let ep_plus = Vector2::new(
-            PREC.fb(PREC.fb(&z_x * &d) - PREC.fb(&z_y * &c)),
-            PREC.fb(PREC.fb(&z_y * &d) + PREC.fb(&z_x * &c)),
-        );
-        let ep_minus = Vector2::new(
-            PREC.fb(PREC.fb(&z_x * &d) + PREC.fb(&z_y * &c)),
-            PREC.fb(PREC.fb(&z_y * &d) - PREC.fb(&z_x * &c)),
-        );
+        let ep_plus = Vector2::new((&z_x * &d) - (&z_y * &c), (&z_y * &d) + (&z_x * &c));
+        let ep_minus = Vector2::new((&z_x * &d) + (&z_y * &c), (&z_y * &d) - (&z_x * &c));
         // Outer-arc midpoint: sqrt(s) * (z_x, z_y).
-        let cap_top = Vector2::new(PREC.fb(&sqrt_s * &z_x), PREC.fb(&sqrt_s * &z_y));
+        let cap_top = Vector2::new(&sqrt_s * &z_x, &sqrt_s * &z_y);
 
         let ellipse = region.ellipse();
 
@@ -742,11 +736,11 @@ mod tests {
         // containment -- utterly negligible next to the kind of gross error (e.g. an
         // asymptotic-height formula off by a factor of ~2) this test is meant to catch.
         let center = ellipse.p.clone();
-        let shrink = PREC.fb(&PREC.ib(IBig::ONE) - &to_fbig(PREC, 1e-9));
+        let shrink = &PREC.ib(IBig::ONE) - &to_fbig(PREC, 1e-9);
         let nudge_towards_center = |pt: &Vector2<FBig<HalfEven>>| -> Vector2<FBig<HalfEven>> {
             Vector2::new(
-                PREC.fb(&center[0] + PREC.fb(&shrink * PREC.fb(&pt[0] - &center[0]))),
-                PREC.fb(&center[1] + PREC.fb(&shrink * PREC.fb(&pt[1] - &center[1]))),
+                &center[0] + (&shrink * (&pt[0] - &center[0])),
+                &center[1] + (&shrink * (&pt[1] - &center[1])),
             )
         };
         let ep_plus = nudge_towards_center(&ep_plus);
@@ -767,7 +761,7 @@ mod tests {
         );
 
         // Sanity: a point diametrically opposite the cap must NOT be inside.
-        let far_side = Vector2::new(PREC.fb(-(&sqrt_s * &z_x)), PREC.fb(-(&sqrt_s * &z_y)));
+        let far_side = Vector2::new(-(&sqrt_s * &z_x), -(&sqrt_s * &z_y));
         assert!(
             !ellipse.inside(&far_side),
             "diametrically opposite point should not be inside"
@@ -977,10 +971,10 @@ mod tests {
         // Cross-check the closed form directly: error == 2*(p*im_lo^2 + (1-p)*im_hi^2).
         let one = prec.ib(IBig::ONE);
         let two = to_fbig(prec, 2.0);
-        let one_minus_p = prec.fb(&one - &mw.p);
-        let lo_term = prec.fb(&mw.p * prec.fb(&im_lo * &im_lo));
-        let hi_term = prec.fb(&one_minus_p * prec.fb(&im_hi * &im_hi));
-        let expected_error = prec.fb(&two * prec.fb(&lo_term + &hi_term));
+        let one_minus_p = &one - &mw.p;
+        let lo_term = &mw.p * (&im_lo * &im_lo);
+        let hi_term = &one_minus_p * (&im_hi * &im_hi);
+        let expected_error = &two * (&lo_term + &hi_term);
         assert!(
             approx_eq(
                 &mw.projective_diamond_error,
@@ -1017,7 +1011,7 @@ mod tests {
             let prec = result.prec;
             let mut total = prec.ib(IBig::ZERO);
             for branch in &result.branches {
-                total = prec.fb(&total + &branch.weight);
+                total = &total + &branch.weight;
             }
             assert!(
                 approx_eq(&total, &prec.ib(IBig::ONE), safe_tol_bits(prec)),

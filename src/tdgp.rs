@@ -130,5 +130,5 @@ fn get_dt_x(prec: Prec, k: i64, int_y: &Interval) -> FBig<HalfEven> {
             &width_product
         }
     };
-    prec.fb(&ten / max_val)
+    &ten / max_val
 }

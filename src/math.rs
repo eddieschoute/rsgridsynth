@@ -19,7 +19,7 @@ pub fn sqrt2(prec: Prec) -> FBig<HalfEven> {
 // This may be wasteful because of the allocation
 pub fn sqrt_fbig(prec: Prec, x: &FBig<HalfEven>) -> FBig<HalfEven> {
     let ctx: Context<mode::HalfEven> = prec.ctx();
-    let x = prec.fb(x.clone());
+    let x = x.clone();
     let sx: FBig<HalfEven> = ctx.sqrt(x.repr()).value();
     sx
 }

@@ -59,13 +59,13 @@ pub(crate) fn phase_cos_sin(
 ) -> (FBig<HalfEven>, FBig<HalfEven>, FBig<HalfEven>) {
     let re_v = v.real(prec).clone();
     let im_v = v.imag(prec).clone();
-    let v_norm_sq = prec.fb(prec.fb(&re_v * &re_v) + prec.fb(&im_v * &im_v));
+    let v_norm_sq = (&re_v * &re_v) + (&im_v * &im_v);
     if v_norm_sq.repr().is_zero() {
         return (prec.ib(IBig::ONE), prec.ib(IBig::ZERO), prec.ib(IBig::ONE));
     }
     let v_norm = sqrt_fbig(prec, &v_norm_sq);
-    let cos_phi = prec.fb(&re_v / &v_norm);
-    let sin_phi = prec.fb(&im_v / &v_norm);
+    let cos_phi = &re_v / &v_norm;
+    let sin_phi = &im_v / &v_norm;
     (cos_phi, sin_phi, v_norm_sq)
 }
 
@@ -160,8 +160,8 @@ impl SectorRegion {
         let q_scaled = q * DRootTwo::from_zroottwo(scale.clone());
 
         let one = prec.ib(IBig::ONE);
-        let sin_sq = prec.fb(&sin_alpha * &sin_alpha);
-        let cos_alpha = sqrt_fbig(prec, &prec.fb(&one - &sin_sq));
+        let sin_sq = &sin_alpha * &sin_alpha;
+        let cos_alpha = sqrt_fbig(prec, &(&one - &sin_sq));
 
         let sqrt_s = sqrt_fbig(prec, &scale.to_real(prec));
         let qs_real = q_scaled.to_real(prec);
@@ -172,33 +172,33 @@ impl SectorRegion {
         // a valid over-approximation of the true arc-bounded inner edge, since every point
         // on the true inner arc within the angular wedge has x-coordinate >=
         // sqrt(q*scale)*cos(alpha)).
-        let inner_x = prec.fb(&sqrt_qs * &cos_alpha);
-        let a0 = prec.fb(prec.fb(&sqrt_s - &inner_x) / &two);
-        let x_c = prec.fb(prec.fb(&inner_x + &sqrt_s) / &two);
+        let inner_x = &sqrt_qs * &cos_alpha;
+        let a0 = (&sqrt_s - &inner_x) / &two;
+        let x_c = (&inner_x + &sqrt_s) / &two;
         // Box tangential half-width, at the outer radius (the sector's widest point).
-        let b0 = prec.fb(&sqrt_s * &sin_alpha);
+        let b0 = &sqrt_s * &sin_alpha;
 
         // Circumscribe the box with an ellipse using semi-axes sqrt(2)*A0, sqrt(2)*B0: for
         // |x|<=A0, |y|<=B0, (x/(sqrt(2)*A0))^2 + (y/(sqrt(2)*B0))^2 <= 1/2 + 1/2 = 1, so the
         // box (hence the true sector, which the box contains) is provably contained.
         let sqrt2_val = sqrt2(prec);
-        let a_axis = prec.fb(&sqrt2_val * &a0);
-        let b_axis = prec.fb(&sqrt2_val * &b0);
+        let a_axis = &sqrt2_val * &a0;
+        let b_axis = &sqrt2_val * &b0;
 
         let zero: FBig<HalfEven> = prec.ib(IBig::ZERO);
-        let neg_z_y: FBig<HalfEven> = -prec.fb(z_y.clone());
+        let neg_z_y: FBig<HalfEven> = -(z_y.clone());
         let d1: Matrix2<FBig<HalfEven>> =
             Matrix2::new(z_x.clone(), neg_z_y.clone(), z_y.clone(), z_x.clone());
-        let inv_a2 = prec.fb(&one / prec.fb(&a_axis * &a_axis));
-        let inv_b2 = prec.fb(&one / prec.fb(&b_axis * &b_axis));
+        let inv_a2 = &one / (&a_axis * &a_axis);
+        let inv_b2 = &one / (&b_axis * &b_axis);
         let d2: Matrix2<FBig<HalfEven>> = Matrix2::new(inv_a2, zero.clone(), zero.clone(), inv_b2);
         let d3: Matrix2<FBig<HalfEven>> =
             Matrix2::new(z_x.clone(), z_y.clone(), neg_z_y, z_x.clone());
         let m1 = matrix_multiply_2x2(prec, &d1, &d2);
         let m = matrix_multiply_2x2(prec, &m1, &d3);
 
-        let px = prec.fb(&x_c * &z_x);
-        let py = prec.fb(&x_c * &z_y);
+        let px = &x_c * &z_x;
+        let py = &x_c * &z_y;
         let p = Vector2::new(px, py);
         let ellipse = Ellipse::new(m, p, prec);
 
@@ -228,7 +228,7 @@ fn clip_ge(
 ) -> Option<(FBig<HalfEven>, FBig<HalfEven>)> {
     let zero = prec.ib(IBig::ZERO);
     if slope > &zero {
-        let bound = prec.fb(rhs / slope);
+        let bound = rhs / slope;
         let new_t0 = if t0 > bound { t0 } else { bound };
         if new_t0 > t1 {
             None
@@ -236,7 +236,7 @@ fn clip_ge(
             Some((new_t0, t1))
         }
     } else if slope < &zero {
-        let bound = prec.fb(rhs / slope);
+        let bound = rhs / slope;
         let new_t1 = if t1 < bound { t1 } else { bound };
         if t0 > new_t1 {
             None
@@ -261,7 +261,7 @@ fn clip_le(
 ) -> Option<(FBig<HalfEven>, FBig<HalfEven>)> {
     let zero = prec.ib(IBig::ZERO);
     if slope > &zero {
-        let bound = prec.fb(rhs / slope);
+        let bound = rhs / slope;
         let new_t1 = if t1 < bound { t1 } else { bound };
         if t0 > new_t1 {
             None
@@ -269,7 +269,7 @@ fn clip_le(
             Some((t0, new_t1))
         }
     } else if slope < &zero {
-        let bound = prec.fb(rhs / slope);
+        let bound = rhs / slope;
         let new_t0 = if t0 > bound { t0 } else { bound };
         if new_t0 > t1 {
             None
@@ -299,14 +299,14 @@ impl Region for SectorRegion {
         }
 
         // Im(w) = z_x*Im(u) - z_y*Re(u), matching `WFrame::im_w` exactly.
-        let term1 = prec.fb(&self.z_x * u.imag(prec));
-        let term2 = prec.fb(&self.z_y * u.real(prec));
-        let im_w = prec.fb(&term1 - &term2);
-        let im_w_sq = prec.fb(&im_w * &im_w);
+        let term1 = &self.z_x * u.imag(prec);
+        let term2 = &self.z_y * u.real(prec);
+        let im_w = &term1 - &term2;
+        let im_w_sq = &im_w * &im_w;
 
         let norm_real = norm.to_real(prec);
-        let sin_alpha_sq = prec.fb(&self.sin_alpha * &self.sin_alpha);
-        let rhs = prec.fb(&sin_alpha_sq * &norm_real);
+        let sin_alpha_sq = &self.sin_alpha * &self.sin_alpha;
+        let rhs = &sin_alpha_sq * &norm_real;
 
         im_w_sq <= rhs
     }
@@ -321,26 +321,24 @@ impl Region for SectorRegion {
         let (t0, t1) =
             crate::math::solve_quadratic(prec, a.real(prec), b.real(prec), c.real(prec))?;
 
-        let re_w_u0 =
-            prec.fb(prec.fb(&self.z_x * u0.real(prec)) + prec.fb(&self.z_y * u0.imag(prec)));
-        let im_w_u0 =
-            prec.fb(prec.fb(&self.z_x * u0.imag(prec)) - prec.fb(&self.z_y * u0.real(prec)));
-        let re_w_v = prec.fb(prec.fb(&self.z_x * v.real(prec)) + prec.fb(&self.z_y * v.imag(prec)));
-        let im_w_v = prec.fb(prec.fb(&self.z_x * v.imag(prec)) - prec.fb(&self.z_y * v.real(prec)));
+        let re_w_u0 = (&self.z_x * u0.real(prec)) + (&self.z_y * u0.imag(prec));
+        let im_w_u0 = (&self.z_x * u0.imag(prec)) - (&self.z_y * u0.real(prec));
+        let re_w_v = (&self.z_x * v.real(prec)) + (&self.z_y * v.imag(prec));
+        let im_w_v = (&self.z_x * v.imag(prec)) - (&self.z_y * v.real(prec));
 
         let one = prec.ib(IBig::ONE);
-        let sin_sq = prec.fb(&self.sin_alpha * &self.sin_alpha);
-        let cos_alpha = sqrt_fbig(prec, &prec.fb(&one - &sin_sq));
-        let tan_alpha = prec.fb(&self.sin_alpha / &cos_alpha);
+        let sin_sq = &self.sin_alpha * &self.sin_alpha;
+        let cos_alpha = sqrt_fbig(prec, &(&one - &sin_sq));
+        let tan_alpha = &self.sin_alpha / &cos_alpha;
 
         // (a) Im(w) <= Re(w)*tan(alpha)  <=>  t*gv <= rhs_a, gv = Im(w_v) - tan*Re(w_v).
-        let gv = prec.fb(&im_w_v - prec.fb(&tan_alpha * &re_w_v));
-        let rhs_a = prec.fb(prec.fb(&tan_alpha * &re_w_u0) - &im_w_u0);
+        let gv = &im_w_v - (&tan_alpha * &re_w_v);
+        let rhs_a = (&tan_alpha * &re_w_u0) - &im_w_u0;
         let (t0, t1) = clip_le(prec, t0, t1, &gv, &rhs_a)?;
 
         // (b) Im(w) >= -Re(w)*tan(alpha)  <=>  t*hv >= rhs_b, hv = Im(w_v) + tan*Re(w_v).
-        let hv = prec.fb(&im_w_v + prec.fb(&tan_alpha * &re_w_v));
-        let rhs_b = -prec.fb(prec.fb(&tan_alpha * &re_w_u0) + &im_w_u0);
+        let hv = &im_w_v + (&tan_alpha * &re_w_v);
+        let rhs_b = -((&tan_alpha * &re_w_u0) + &im_w_u0);
         let (t0, t1) = clip_ge(prec, t0, t1, &hv, &rhs_b)?;
 
         // (c) Re(w) >= sqrt(q_scaled)*cos(alpha) -- the chord replacing the inner arc,
@@ -348,8 +346,8 @@ impl Region for SectorRegion {
         // makes an annulus non-convex).
         let qs_real = self.q_scaled.to_real(prec);
         let sqrt_qs = sqrt_fbig(prec, &qs_real);
-        let d_inner = prec.fb(&sqrt_qs * &cos_alpha);
-        let rhs_c = prec.fb(&d_inner - &re_w_u0);
+        let d_inner = &sqrt_qs * &cos_alpha;
+        let rhs_c = &d_inner - &re_w_u0;
         clip_ge(prec, t0, t1, &re_w_v, &rhs_c)
     }
 }
@@ -380,10 +378,10 @@ pub(crate) fn half_angle_cos_sin(
     // just outside `[-1, 1]`; guard against the resulting tiny negative `sqrt_fbig` input,
     // matching the analogous clamp in `gridsynth::compute_error`/`mixing::diagonal_diamond_distance`.
     let zero = prec.ib(IBig::ZERO);
-    let one_plus_cos = prec.fb(&one + cos_phi).max(zero.clone());
-    let one_minus_cos = prec.fb(&one - cos_phi).max(zero);
-    let cos_half = sqrt_fbig(prec, &prec.fb(&one_plus_cos / &two));
-    let sin_half_mag = sqrt_fbig(prec, &prec.fb(&one_minus_cos / &two));
+    let one_plus_cos = (&one + cos_phi).max(zero.clone());
+    let one_minus_cos = (&one - cos_phi).max(zero);
+    let cos_half = sqrt_fbig(prec, &(&one_plus_cos / &two));
+    let sin_half_mag = sqrt_fbig(prec, &(&one_minus_cos / &two));
 
     let sin_half = if sign(prec, sin_phi.clone()) < 0 {
         -sin_half_mag
@@ -419,7 +417,7 @@ impl FallbackResult {
         let prec = self.prec;
         let u = DOmegaUnitary::from_gates(&self.projective_gates);
         let z = u.z();
-        prec.fb(prec.fb(z.real(prec) * z.real(prec)) + prec.fb(z.imag(prec) * z.imag(prec)))
+        (z.real(prec) * z.real(prec)) + (z.imag(prec) * z.imag(prec))
     }
 }
 
@@ -455,10 +453,8 @@ pub(crate) fn residual_wframe(
 
     // cos(-theta_B/2) = cos(A+B) = Z_X*cos(phi/2) - Z_Y*sin(phi/2)
     // sin(-theta_B/2) = sin(A+B) = Z_Y*cos(phi/2) + Z_X*sin(phi/2)
-    let cos_neg_theta_b_half =
-        prec.fb(prec.fb(&z_x * &cos_half_phi) - prec.fb(&z_y * &sin_half_phi));
-    let sin_neg_theta_b_half =
-        prec.fb(prec.fb(&z_y * &cos_half_phi) + prec.fb(&z_x * &sin_half_phi));
+    let cos_neg_theta_b_half = (&z_x * &cos_half_phi) - (&z_y * &sin_half_phi);
+    let sin_neg_theta_b_half = (&z_y * &cos_half_phi) + (&z_x * &sin_half_phi);
 
     WFrame::from_target_direction(prec, cos_neg_theta_b_half, sin_neg_theta_b_half)
 }
@@ -518,8 +514,8 @@ impl AchievedDiamondError for FallbackResult {
             residual_diamond_error(prec, theta, &self.projective_gates, &self.correction_gates);
 
         let one = prec.ib(IBig::ONE);
-        let one_minus_p = prec.fb(&one - &p_success);
-        prec.fb(prec.fb(&p_success * &success_dist) + prec.fb(&one_minus_p * &failure_dist))
+        let one_minus_p = &one - &p_success;
+        (&p_success * &success_dist) + (&one_minus_p * &failure_dist)
     }
 }
 
@@ -594,12 +590,10 @@ pub fn synth_fallback(
 
     // cos(-theta_B/2) = cos(A+B) = Z_X*cos(phi/2) - Z_Y*sin(phi/2)
     // sin(-theta_B/2) = sin(A+B) = Z_Y*cos(phi/2) + Z_X*sin(phi/2)
-    let cos_neg_theta_b_half =
-        prec.fb(prec.fb(&z_x * &cos_half_phi) - prec.fb(&z_y * &sin_half_phi));
-    let sin_neg_theta_b_half =
-        prec.fb(prec.fb(&z_y * &cos_half_phi) + prec.fb(&z_x * &sin_half_phi));
+    let cos_neg_theta_b_half = (&z_x * &cos_half_phi) - (&z_y * &sin_half_phi);
+    let sin_neg_theta_b_half = (&z_y * &cos_half_phi) + (&z_x * &sin_half_phi);
 
-    let epsilon_for_correction = prec.fb(prec.fb(&epsilon_spec / &two) / &v_norm_sq);
+    let epsilon_for_correction = (&epsilon_spec / &two) / &v_norm_sq;
 
     let correction_region = EpsilonRegion::from_target_direction(
         prec,
@@ -660,7 +654,7 @@ mod tests {
             "exact_q(7).to_real(PREC) = {real}, expected {expected}"
         );
         // Sanity: 1 - q <= 0.01, matching the paper's bound.
-        let one_minus_q = PREC.fb(PREC.ib(IBig::ONE) - &real);
+        let one_minus_q = PREC.ib(IBig::ONE) - &real;
         assert!(one_minus_q <= to_fbig(PREC, 0.01));
     }
 
@@ -759,9 +753,8 @@ mod tests {
             let (cos_half, sin_half) = half_angle_cos_sin(PREC, &cos_phi, &sin_phi);
 
             // Double-angle reconstruction.
-            let reconstructed_cos =
-                PREC.fb(PREC.fb(&cos_half * &cos_half) - PREC.fb(&sin_half * &sin_half));
-            let reconstructed_sin = PREC.fb(to_fbig(PREC, 2.0) * PREC.fb(&cos_half * &sin_half));
+            let reconstructed_cos = (&cos_half * &cos_half) - (&sin_half * &sin_half);
+            let reconstructed_sin = to_fbig(PREC, 2.0) * (&cos_half * &sin_half);
 
             assert!(
                 approx_eq(&reconstructed_cos, &cos_phi, 40),

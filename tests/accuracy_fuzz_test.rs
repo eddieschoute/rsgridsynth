@@ -72,7 +72,7 @@ fn independent_operator_error(
     // (0,0)-entry phase relationship.
     let eig: FBig<HalfEven> = 2 - 2 * (&z_x * &u.re + &z_y * &u.im);
     let eig = eig.max(FBig::from(0));
-    let norm = prec.fb(eig.sqrt());
+    let norm = eig.sqrt();
     match norm.to_f64() {
         Approximation::Inexact(v, _) => v,
         Approximation::Exact(v) => v,

@@ -134,8 +134,8 @@ impl EpsilonRegion {
     ) -> Self {
         let one = prec.fb(FBig::try_from(1.0).unwrap());
         let four = prec.fb(FBig::try_from(4.0).unwrap());
-        let epsilon_squared = prec.fb(&epsilon * &epsilon);
-        let half_eps_sq = prec.fb(&epsilon_squared / &four);
+        let epsilon_squared = &epsilon * &epsilon;
+        let half_eps_sq = &epsilon_squared / &four;
         // `epsilon` >= 2 (or a derived epsilon that overshoots it, e.g. the fallback
         // protocol's rescaled correction-step epsilon on a near-degenerate candidate) is
         // already past the point where any point of the disk fails to qualify: the sane
@@ -144,24 +144,24 @@ impl EpsilonRegion {
         // artifact (or a legitimately oversized derived epsilon) panic in `sqrt_fbig`.
         let one_minus_half_eps_sq = (one - half_eps_sq).max(prec.ib(IBig::ZERO));
         let scale_to_real = scale.to_real(prec);
-        let d = prec.fb(sqrt_fbig(prec, &one_minus_half_eps_sq) * sqrt_fbig(prec, &scale_to_real));
+        let d = sqrt_fbig(prec, &one_minus_half_eps_sq) * sqrt_fbig(prec, &scale_to_real);
 
-        let neg_z_y: FBig<HalfEven> = -prec.fb(z_y.clone());
+        let neg_z_y: FBig<HalfEven> = -(z_y.clone());
         let zero: FBig<HalfEven> = prec.ib(IBig::ZERO);
-        let epsilon_neg4: FBig<HalfEven> = prec.fb(epsilon.clone().powi(IBig::from(-4)));
-        let epsilon_neg2: FBig<HalfEven> = prec.fb(epsilon.clone().powi(IBig::from(-2)));
+        let epsilon_neg4: FBig<HalfEven> = epsilon.clone().powi(IBig::from(-4));
+        let epsilon_neg2: FBig<HalfEven> = epsilon.clone().powi(IBig::from(-2));
         let d1: Matrix2<FBig<HalfEven>> =
             Matrix2::new(z_x.clone(), neg_z_y.clone(), z_y.clone(), z_x.clone());
         let d2: Matrix2<FBig<HalfEven>> = Matrix2::new(
-            prec.fb(64 * epsilon_neg4 / &scale_to_real),
+            64 * epsilon_neg4 / &scale_to_real,
             zero.clone(),
             zero.clone(),
-            prec.fb(4 * epsilon_neg2 / &scale_to_real),
+            4 * epsilon_neg2 / &scale_to_real,
         );
         let d3: Matrix2<FBig<HalfEven>> =
             Matrix2::new(z_x.clone(), z_y.clone(), neg_z_y, z_x.clone());
-        let px = prec.fb(&d * &z_x);
-        let py = prec.fb(&d * &z_y);
+        let px = &d * &z_x;
+        let py = &d * &z_y;
         let p = Vector2::new(px, py);
         let m1: Matrix2<FBig<HalfEven>> = matrix_multiply_2x2(prec, &d1, &d2);
         let m: Matrix2<FBig<HalfEven>> = matrix_multiply_2x2(prec, &m1, &d3);
@@ -189,9 +189,9 @@ impl Region for EpsilonRegion {
     // For "up to phase" it is scaled by |δ|^2 = 2 + √2.
     fn inside(&self, u: &DOmega) -> bool {
         let prec = self.prec;
-        let cos_term1 = prec.fb(&self.z_x * u.real(prec));
-        let cos_term2 = prec.fb(&self.z_y * u.imag(prec));
-        let cos_similarity = prec.fb(&cos_term1 + &cos_term2);
+        let cos_term1 = &self.z_x * u.real(prec);
+        let cos_term2 = &self.z_y * u.imag(prec);
+        let cos_similarity = &cos_term1 + &cos_term2;
 
         DRootTwo::from_domega(u.conj() * u) <= DRootTwo::from_zroottwo(self.scale.clone())
             && cos_similarity >= self.d
@@ -202,23 +202,23 @@ impl Region for EpsilonRegion {
         let a = v.conj() * v;
         let b = 2 * (v.conj() * u0);
         let c = u0.conj() * u0 - DOmega::from_zroottwo(&self.scale);
-        let vz_term1 = prec.fb(&self.z_x * v.real(prec));
-        let vz_term2 = prec.fb(&self.z_y * v.imag(prec));
-        let vz = prec.fb(&vz_term1 + &vz_term2);
+        let vz_term1 = &self.z_x * v.real(prec);
+        let vz_term2 = &self.z_y * v.imag(prec);
+        let vz = &vz_term1 + &vz_term2;
 
-        let term1 = prec.fb(&self.z_x * u0.real(prec));
-        let term2 = prec.fb(&self.z_y * u0.imag(prec));
-        let temp_sub = prec.fb(&self.d - &term1);
-        let rhs = prec.fb(&temp_sub - &term2);
+        let term1 = &self.z_x * u0.real(prec);
+        let term2 = &self.z_y * u0.imag(prec);
+        let temp_sub = &self.d - &term1;
+        let rhs = &temp_sub - &term2;
         // t0 <= t1
         let (t0, t1) = solve_quadratic(prec, a.real(prec), b.real(prec), c.real(prec))?;
-        let zero = prec.fb(prec.ib(IBig::ZERO));
+        let zero = prec.ib(IBig::ZERO);
 
         if vz > zero {
-            let t2 = prec.fb(&rhs / &vz);
+            let t2 = &rhs / &vz;
             Some(if t0 > t2 { (t0, t1) } else { (t2, t1) })
         } else if vz < zero {
-            let t2 = prec.fb(&rhs / &vz);
+            let t2 = &rhs / &vz;
             Some(if t1 < t2 { (t0, t1) } else { (t0, t2) })
         } else if rhs <= zero {
             Some((t0, t1))

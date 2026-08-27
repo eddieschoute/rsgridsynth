@@ -78,7 +78,7 @@ impl MixedFallbackSide {
         let prec = self.prec;
         let u = DOmegaUnitary::from_gates(&self.projective_gates);
         let z = u.z();
-        prec.fb(prec.fb(z.real(prec) * z.real(prec)) + prec.fb(z.imag(prec) * z.imag(prec)))
+        (z.real(prec) * z.real(prec)) + (z.imag(prec) * z.imag(prec))
     }
 }
 
@@ -117,8 +117,8 @@ impl AchievedDiamondError for MixedFallbackSide {
             weighted_correction_distance(prec, theta, &self.projective_gates, &self.correction);
 
         let one = prec.ib(IBig::ONE);
-        let one_minus_p = prec.fb(&one - &p_success);
-        prec.fb(prec.fb(&p_success * &success_dist) + prec.fb(&one_minus_p * &failure_dist))
+        let one_minus_p = &one - &p_success;
+        (&p_success * &success_dist) + (&one_minus_p * &failure_dist)
     }
 }
 
@@ -194,18 +194,18 @@ impl AchievedDiamondError for MixedFallbackResult {
                     .projective_diamond_error;
 
                 let one = prec.ib(IBig::ONE);
-                let one_minus_p = prec.fb(&one - p);
-                let lo_fail_prob = prec.fb(&one - &lo.achieved_success_probability());
-                let hi_fail_prob = prec.fb(&one - &hi.achieved_success_probability());
+                let one_minus_p = &one - p;
+                let lo_fail_prob = &one - &lo.achieved_success_probability();
+                let hi_fail_prob = &one - &hi.achieved_success_probability();
                 let lo_failure_dist =
                     weighted_correction_distance(prec, theta, &lo.projective_gates, &lo.correction);
                 let hi_failure_dist =
                     weighted_correction_distance(prec, theta, &hi.projective_gates, &hi.correction);
 
-                let lo_term = prec.fb(prec.fb(p * &lo_fail_prob) * &lo_failure_dist);
-                let hi_term = prec.fb(prec.fb(&one_minus_p * &hi_fail_prob) * &hi_failure_dist);
+                let lo_term = (p * &lo_fail_prob) * &lo_failure_dist;
+                let hi_term = (&one_minus_p * &hi_fail_prob) * &hi_failure_dist;
 
-                prec.fb(prec.fb(&projective_term + &lo_term) + &hi_term)
+                (&projective_term + &lo_term) + &hi_term
             }
         }
     }
@@ -241,7 +241,7 @@ fn build_side(
 
     // Same ep2 = (eps/2)/|v|^2 recipe as plain fallback's correction budget.
     let two = prec.fb(FBig::try_from(2.0).unwrap());
-    let epsilon_for_correction = prec.fb(prec.fb(epsilon_spec / &two) / &v_norm_sq);
+    let epsilon_for_correction = (epsilon_spec / &two) / &v_norm_sq;
 
     let exact_scale = ZRootTwo::new(IBig::from(1), IBig::from(0));
     let correction_region = MixedDiagonalRegion::from_target_direction(
@@ -302,7 +302,7 @@ pub fn synth_mixed_fallback(
     // Mixed protocols' wider angular half-width: sin(alpha) = sqrt(eps/2), vs. plain
     // fallback's eps/2 (Prop 3.16 vs. Prop 3.9).
     let two = prec.fb(FBig::try_from(2.0).unwrap());
-    let half_eps = prec.fb(&epsilon_spec / &two);
+    let half_eps = &epsilon_spec / &two;
     let sin_alpha = sqrt_fbig(prec, &half_eps);
 
     let scale = ZRootTwo::new(IBig::from(1), IBig::from(0));

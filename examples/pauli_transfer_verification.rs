@@ -123,23 +123,23 @@ fn fone() -> Fb {
 }
 
 fn fadd(a: &Fb, b: &Fb) -> Fb {
-    PREC.fb(a + b)
+    a + b
 }
 
 fn fsub(a: &Fb, b: &Fb) -> Fb {
-    PREC.fb(a - b)
+    a - b
 }
 
 fn fmul(a: &Fb, b: &Fb) -> Fb {
-    PREC.fb(a * b)
+    a * b
 }
 
 fn fdiv(a: &Fb, b: &Fb) -> Fb {
-    PREC.fb(a / b)
+    a / b
 }
 
 fn fneg(a: &Fb) -> Fb {
-    -PREC.fb(a.clone())
+    -(a.clone())
 }
 
 /// Arbitrary-precision complex number. `+`/`-`/`*`/[`Complex::conj`]/[`Complex::scale`]/

@@ -401,7 +401,7 @@ impl Ellipse {
 
         let sum12 = &term1 + &term2;
         let value = &sum12 + &term3;
-        value <= self.prec.fb(FBig::<HalfEven>::from(1))
+        value <= (FBig::<HalfEven>::from(1))
     }
 
     pub fn bbox(&self) -> Rectangle {

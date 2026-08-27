@@ -80,9 +80,9 @@ impl WFrame {
     /// element, e.g. after rotating by an extra phase that isn't ring-representable (like the
     /// `e^{i pi/8}` shift `PhaseMode::Shifted` uses).
     pub fn re_w_fbig(&self, re: &FBig<HalfEven>, im: &FBig<HalfEven>) -> FBig<HalfEven> {
-        let term1 = self.prec.fb(&self.z_x * re);
-        let term2 = self.prec.fb(&self.z_y * im);
-        self.prec.fb(&term1 + &term2)
+        let term1 = &self.z_x * re;
+        let term2 = &self.z_y * im;
+        &term1 + &term2
     }
 
     /// `Re(w)` where `w = u * e^{i theta/2}`. Matches `EpsilonRegion`'s existing
@@ -93,9 +93,9 @@ impl WFrame {
 
     /// `Im(w)` where `w = u * e^{i theta/2}`.
     pub fn im_w(&self, u: &DOmega) -> FBig<HalfEven> {
-        let term1 = self.prec.fb(&self.z_x * u.imag(self.prec));
-        let term2 = self.prec.fb(&self.z_y * u.real(self.prec));
-        self.prec.fb(&term1 - &term2)
+        let term1 = &self.z_x * u.imag(self.prec);
+        let term2 = &self.z_y * u.real(self.prec);
+        &term1 - &term2
     }
 }
 
@@ -104,14 +104,14 @@ impl WFrame {
 /// [`WFrame::re_w`]): `||Z_phi - U||_diamond = 2*sqrt(1 - Re(w)^2)`.
 pub fn diagonal_diamond_distance(prec: Prec, re_w: &FBig<HalfEven>) -> FBig<HalfEven> {
     let one = prec.ib(IBig::ONE);
-    let re_w_sq = prec.fb(re_w * re_w);
-    let one_minus_re_w_sq = prec.fb(&one - &re_w_sq);
+    let re_w_sq = re_w * re_w;
+    let one_minus_re_w_sq = &one - &re_w_sq;
     // Guard against tiny negative values from rounding error, matching the analogous
     // clamp in `gridsynth::compute_error`.
     let zero = prec.ib(IBig::ZERO);
     let clamped = one_minus_re_w_sq.max(zero);
     let two = prec.fb(FBig::try_from(2.0).unwrap());
-    prec.fb(&two * sqrt_fbig(prec, &clamped))
+    &two * sqrt_fbig(prec, &clamped)
 }
 
 /// Decodes `gates`, optionally rotating the decoded top-left entry by the extra `e^{i pi/8}`
@@ -129,7 +129,7 @@ pub(crate) fn gate_seq_diamond_error(
 
     let re_w = if extra_eighth_turn {
         let p = prec.fb(FBig::<HalfEven>::try_from(std::f64::consts::PI / 8.).unwrap());
-        let phase = Complex::new(prec.fb(cos_fbig(prec, &p)), prec.fb(sin_fbig(prec, &p)));
+        let phase = Complex::new(cos_fbig(prec, &p), sin_fbig(prec, &p));
         let z = Complex::new(u.z().real(prec).clone(), u.z().imag(prec).clone());
         let shifted = &z * &phase;
         wframe.re_w_fbig(&shifted.re, &shifted.im)
@@ -177,11 +177,10 @@ pub fn achieved_phase_diamond_error(
 ) -> FBig<HalfEven> {
     let u = DOmegaUnitary::from_gates(gates);
     let z = u.z();
-    let norm_sq =
-        prec.fb(prec.fb(z.real(prec) * z.real(prec)) + prec.fb(z.imag(prec) * z.imag(prec)));
+    let norm_sq = (z.real(prec) * z.real(prec)) + (z.imag(prec) * z.imag(prec));
     let norm = sqrt_fbig(prec, &norm_sq);
-    let re_n = prec.fb(z.real(prec) / &norm);
-    let im_n = prec.fb(z.imag(prec) / &norm);
+    let re_n = z.real(prec) / &norm;
+    let im_n = z.imag(prec) / &norm;
 
     let wframe = WFrame::new(prec, theta);
     let re_w = wframe.re_w_fbig(&re_n, &im_n);

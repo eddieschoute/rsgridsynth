@@ -106,25 +106,25 @@ pub fn mixture_weight(
         });
     }
 
-    let hi_cross = prec.fb(re_hi * im_hi);
-    let lo_cross = prec.fb(re_lo * im_lo);
-    let denom = prec.fb(&hi_cross - &lo_cross);
+    let hi_cross = re_hi * im_hi;
+    let lo_cross = re_lo * im_lo;
+    let denom = &hi_cross - &lo_cross;
     if denom.repr().is_zero() {
         // Neither branch is exact, yet the closed form is 0/0: a genuinely degenerate,
         // ill-posed pair. Refuse to guess rather than divide by zero.
         return None;
     }
-    let p = prec.fb(&hi_cross / &denom);
+    let p = &hi_cross / &denom;
 
     let one = prec.ib(IBig::ONE);
-    let one_minus_p = prec.fb(&one - &p);
-    let im_lo_sq = prec.fb(im_lo * im_lo);
-    let im_hi_sq = prec.fb(im_hi * im_hi);
-    let lo_term = prec.fb(&p * &im_lo_sq);
-    let hi_term = prec.fb(&one_minus_p * &im_hi_sq);
-    let sum_terms = prec.fb(&lo_term + &hi_term);
+    let one_minus_p = &one - &p;
+    let im_lo_sq = im_lo * im_lo;
+    let im_hi_sq = im_hi * im_hi;
+    let lo_term = &p * &im_lo_sq;
+    let hi_term = &one_minus_p * &im_hi_sq;
+    let sum_terms = &lo_term + &hi_term;
     let two = prec.fb(FBig::try_from(2.0).unwrap());
-    let projective_diamond_error = prec.fb(&two * &sum_terms);
+    let projective_diamond_error = &two * &sum_terms;
 
     Some(MixtureWeight {
         p,
@@ -142,8 +142,8 @@ pub fn pauli_diamond_distance(
 ) -> FBig<HalfEven> {
     let mut sum = prec.ib(IBig::ZERO);
     for (x, y) in a.iter().zip(b.iter()) {
-        let diff = prec.fb(x - y);
-        sum = prec.fb(&sum + diff.abs());
+        let diff = x - y;
+        sum = &sum + diff.abs();
     }
     sum
 }
@@ -161,7 +161,7 @@ pub fn pauli_diamond_distance(
 /// here.
 pub fn diamond_to_spec_epsilon(prec: Prec, eps_diamond: &FBig<HalfEven>) -> FBig<HalfEven> {
     let two = prec.fb(FBig::try_from(2.0).unwrap());
-    prec.fb(eps_diamond / &two)
+    eps_diamond / &two
 }
 
 #[cfg(test)]
@@ -219,11 +219,8 @@ mod tests {
             for u in sample_domegas() {
                 let re_w = frame.re_w(&u);
                 let im_w = frame.im_w(&u);
-                let lhs = PREC.fb(PREC.fb(&re_w * &re_w) + PREC.fb(&im_w * &im_w));
-                let rhs =
-                    PREC.fb(
-                        PREC.fb(u.real(PREC) * u.real(PREC)) + PREC.fb(u.imag(PREC) * u.imag(PREC))
-                    );
+                let lhs = (&re_w * &re_w) + (&im_w * &im_w);
+                let rhs = (u.real(PREC) * u.real(PREC)) + (u.imag(PREC) * u.imag(PREC));
                 assert!(
                     approx_eq(&lhs, &rhs, 200),
                     "modulus not preserved for theta={theta_f64}: |w|^2={lhs}, |u|^2={rhs}"
@@ -248,9 +245,9 @@ mod tests {
 
         let one = PREC.ib(IBig::ONE);
         let four = to_fbig(4.0);
-        let eps_sq = PREC.fb(&epsilon * &epsilon);
-        let half_eps_sq = PREC.fb(&eps_sq / &four);
-        let one_minus_half_eps_sq = PREC.fb(&one - &half_eps_sq);
+        let eps_sq = &epsilon * &epsilon;
+        let half_eps_sq = &eps_sq / &four;
+        let one_minus_half_eps_sq = &one - &half_eps_sq;
         let d = PREC
             .fb(sqrt_fbig(PREC, &one_minus_half_eps_sq) * sqrt_fbig(PREC, &scale.to_real(PREC)));
 
@@ -361,8 +358,8 @@ mod tests {
     fn diagonal_diamond_distance_matches_closed_form() {
         // Re(w) = cos(delta) for delta = 0.05: distance should be 2*sin(0.05).
         let delta = to_fbig(0.05);
-        let re_w = PREC.fb(cos_fbig(PREC, &delta));
-        let expected = PREC.fb(to_fbig(2.0) * PREC.fb(sin_fbig(PREC, &delta)));
+        let re_w = cos_fbig(PREC, &delta);
+        let expected = to_fbig(2.0) * (sin_fbig(PREC, &delta));
         let dist = diagonal_diamond_distance(PREC, &re_w);
         assert!(
             approx_eq(&dist, &expected, 200),
