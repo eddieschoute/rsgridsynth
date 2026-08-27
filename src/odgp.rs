@@ -1,7 +1,6 @@
 // Copyright (c) 2024-2025 Shun Yamamoto and Nobuyuki Yoshioka, and IBM
 // Licensed under the MIT License. See LICENSE file in the project root for full license information.
 
-use crate::common::ib_to_bf_prec;
 use crate::math::{floorlog, pow_sqrt2, sqrt2};
 use crate::region::Interval;
 use crate::ring::z_root_two::LAMBDA;
@@ -15,32 +14,34 @@ pub fn solve_odgp(i: Interval, j: Interval) -> impl Iterator<Item = ZRootTwo> {
     // Can't return two different iterator types. So we can't do this check.
     // I checked with dbg! to confirm that omitting this check is ok:
     // If the condition is true, then an empty iterator is returned at the end.
-    //    if i.width() < ib_to_bf_prec(IBig::ZERO) || j.width() < ib_to_bf_prec(IBig::ZERO) {
+    //    if i.width() < prec.ib(IBig::ZERO) || j.width() < prec.ib(IBig::ZERO) {
     //        return vec![].into_iter();
     //    }
+    let prec = i.prec;
 
     let sum = &i.l + &j.l;
     let div_result1: FBig<HalfEven> = sum / 2;
     let a = div_result1.floor().try_into().unwrap();
 
     let diff = &i.l - &j.l;
-    let div_result2: FBig<HalfEven> = (sqrt2() * diff) / 4;
+    let div_result2: FBig<HalfEven> = (sqrt2(prec) * diff) / 4;
     let b = div_result2.floor().try_into().unwrap();
     let alpha = ZRootTwo::new(a, b);
-    let sub_i = i.sub_ref(&alpha.to_real());
-    let sub_j = j.sub_ref(&alpha.conj_sq2().to_real());
+    let sub_i = i.sub_ref(&alpha.to_real(prec));
+    let sub_j = j.sub_ref(&alpha.conj_sq2().to_real(prec));
     let sol = solve_odgp_internal(sub_i, sub_j);
     sol.into_iter()
         .map(move |beta| &beta + &alpha)
         .filter(move |beta| {
-            let real = beta.to_real();
-            let real_conj = beta.conj_sq2().to_real();
+            let real = beta.to_real(prec);
+            let real_conj = beta.conj_sq2().to_real(prec);
             i.within(&real) && j.within(&real_conj)
         })
 }
 
 fn solve_odgp_internal(i: Interval, j: Interval) -> Box<dyn Iterator<Item = ZRootTwo>> {
-    let bfzero = ib_to_bf_prec(IBig::ZERO);
+    let prec = i.prec;
+    let bfzero = prec.ib(IBig::ZERO);
     if i.width() < bfzero || j.width() < bfzero {
         return Box::new(vec![].into_iter());
     } else if i.width() > bfzero && j.width() <= bfzero {
@@ -51,15 +52,15 @@ fn solve_odgp_internal(i: Interval, j: Interval) -> Box<dyn Iterator<Item = ZRoo
     let n = if j.width() <= bfzero {
         IBig::ZERO
     } else {
-        floorlog(j.width(), LAMBDA.to_real()).0
+        floorlog(prec, j.width(), LAMBDA.to_real(prec)).0
     };
 
     let lambda_n = LAMBDA.pow(&n);
     let lambda_inv_n = LAMBDA.pow(&(-&n));
-    let lambda_n_f = lambda_n.to_real();
+    let lambda_n_f = lambda_n.to_real(prec);
 
     let lambda_conj_sq2_n = LAMBDA.conj_sq2().pow(&n);
-    let lambda_conj_sq2_n_f = lambda_conj_sq2_n.to_real();
+    let lambda_conj_sq2_n_f = lambda_conj_sq2_n.to_real(prec);
 
     // Here we replace the intervals (i, j) by their scaled versions
     // (avoiding an extra recursion).
@@ -84,11 +85,11 @@ fn solve_odgp_internal(i: Interval, j: Interval) -> Box<dyn Iterator<Item = ZRoo
         }
     })
     .flat_map(move |a| {
-        let a_real = ib_to_bf_prec(a.clone()); // 明示的に clone して消費
-        let tmp1: FBig<HalfEven> = sqrt2() * (&a_real - &j.r) / 2;
+        let a_real = prec.ib(a.clone()); // 明示的に clone して消費
+        let tmp1: FBig<HalfEven> = sqrt2(prec) * (&a_real - &j.r) / 2;
         let b_min: IBig = tmp1.ceil().try_into().unwrap();
 
-        let tmp2: FBig<HalfEven> = sqrt2() * (&a_real - &j.l) / 2;
+        let tmp2: FBig<HalfEven> = sqrt2(prec) * (&a_real - &j.l) / 2;
         let b_max: IBig = tmp2.floor().try_into().unwrap();
 
         iter::successors(Some(b_min.clone()), move |b| {
@@ -114,9 +115,10 @@ pub fn solve_odgp_with_parity(
     j: Interval,
     beta: &DRootTwo,
 ) -> impl Iterator<Item = ZRootTwo> {
+    let prec = i.prec;
     let p = beta.parity();
-    let scale_factor1 = sqrt2() / 2;
-    let scale_factor2 = -sqrt2() / 2;
+    let scale_factor1 = sqrt2(prec) / 2;
+    let scale_factor2 = -sqrt2(prec) / 2;
     let scaled_i = (i - p.clone()).scale(&scale_factor1);
     let scaled_j = (j - p.clone()).scale(&scale_factor2);
     let sol = solve_odgp(scaled_i, scaled_j);
@@ -130,7 +132,8 @@ pub fn first_solve_scaled_odgp(i: &Interval, j: &Interval, k: i64) -> Option<DRo
 }
 
 pub fn solve_scaled_odgp(i: &Interval, j: &Interval, k: i64) -> impl Iterator<Item = DRootTwo> {
-    let scale = pow_sqrt2(k);
+    let prec = i.prec;
+    let scale = pow_sqrt2(prec, k);
     let neg_scale = -scale.clone();
     let scaled_j = if k & 1 == 0 {
         j.scale(&scale)
@@ -153,6 +156,7 @@ pub fn solve_scaled_odgp_with_parity_k_ne_0(
     //     return solve_odgp_with_parity(i, j, &base)
     //          .map(DRootTwo::from_zroottwo);
     //  }
+    let prec = i.prec;
 
     let p = beta.renew_denomexp(k).parity();
     let offset = if p == IBig::ZERO {
@@ -161,8 +165,8 @@ pub fn solve_scaled_odgp_with_parity_k_ne_0(
         DRootTwo::power_of_inv_sqrt2(k)
     };
 
-    let sub_i = i - offset.to_real();
-    let sub_j = j - offset.conj_sq2().to_real();
+    let sub_i = i - offset.to_real(prec);
+    let sub_j = j - offset.conj_sq2().to_real(prec);
     let sol = solve_scaled_odgp(&sub_i, &sub_j, k - 1);
     sol.map(move |a| a + offset.clone())
 }
@@ -170,10 +174,13 @@ pub fn solve_scaled_odgp_with_parity_k_ne_0(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::Prec;
+
+    const PREC: Prec = Prec(1000);
 
     fn create_empty_interval() -> (Interval, Interval) {
-        let inti = Interval::new(FBig::<HalfEven>::from(4), FBig::<HalfEven>::from(2));
-        let intj = Interval::new(FBig::<HalfEven>::from(2), FBig::<HalfEven>::from(4));
+        let inti = Interval::new(FBig::<HalfEven>::from(4), FBig::<HalfEven>::from(2), PREC);
+        let intj = Interval::new(FBig::<HalfEven>::from(2), FBig::<HalfEven>::from(4), PREC);
         (inti, intj)
     }
 

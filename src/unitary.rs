@@ -1,6 +1,7 @@
 // Copyright (c) 2024-2025 Shun Yamamoto and Nobuyuki Yoshioka, and IBM
 // Licensed under the MIT License. See LICENSE file in the project root for full license information.
 
+use crate::common::Prec;
 use crate::gate::Gate;
 use crate::ring::DOmega;
 use dashu_float::{round::mode::HalfEven, FBig};
@@ -75,13 +76,13 @@ impl DOmegaUnitary {
     }
 
     /// Returns 2x2 nalgebra matrix
-    pub fn to_complex_matrix(&self) -> Matrix2<Complex<FBig<HalfEven>>> {
+    pub fn to_complex_matrix(&self, prec: Prec) -> Matrix2<Complex<FBig<HalfEven>>> {
         let mat = self.to_matrix();
         Matrix2::new(
-            Complex::new(mat[0][0].real().clone(), mat[0][0].imag().clone()),
-            Complex::new(mat[0][1].real().clone(), mat[0][1].imag().clone()),
-            Complex::new(mat[1][0].real().clone(), mat[1][0].imag().clone()),
-            Complex::new(mat[1][1].real().clone(), mat[1][1].imag().clone()),
+            Complex::new(mat[0][0].real(prec).clone(), mat[0][0].imag(prec).clone()),
+            Complex::new(mat[0][1].real(prec).clone(), mat[0][1].imag(prec).clone()),
+            Complex::new(mat[1][0].real(prec).clone(), mat[1][0].imag(prec).clone()),
+            Complex::new(mat[1][1].real(prec).clone(), mat[1][1].imag(prec).clone()),
         )
     }
 

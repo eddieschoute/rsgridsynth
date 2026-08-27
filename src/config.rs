@@ -1,5 +1,4 @@
-use crate::common::ib_to_bf_prec;
-use crate::common::{reset_prec_bits, set_prec_bits};
+use crate::common::Prec;
 use crate::diophantine::Caches;
 use crate::gate::GateSeq;
 use dashu_float::round::mode::HalfEven;
@@ -22,6 +21,11 @@ pub struct DiophantineData {
 pub struct GridSynthConfig {
     pub theta: FBig<HalfEven>,
     pub epsilon: FBig<HalfEven>,
+    /// The working precision this config was built for. `gridsynth_gates`/`gridsynth_unitary`
+    /// build every per-synthesis value from this -- there is no ambient or global precision
+    /// anywhere in this crate, so a config built on one thread and run on another still
+    /// computes at the intended precision.
+    pub prec: Prec,
     pub verbose: bool,
     pub measure_time: bool,
     pub diophantine_data: DiophantineData,
@@ -37,6 +41,11 @@ pub struct GridSynthResult {
 
     /// The global phase factor.
     pub global_phase: bool,
+
+    /// The working precision this result was synthesized at, carried so
+    /// `AchievedDiamondError::achieved_diamond_error` can measure at the right precision
+    /// regardless of which thread calls it.
+    pub prec: Prec,
 }
 
 pub fn parse_decimal_with_exponent(input: &str) -> Option<(IBig, IBig)> {
@@ -85,6 +94,24 @@ pub fn parse_decimal_with_exponent(input: &str) -> Option<(IBig, IBig)> {
     Some((numerator, denominator))
 }
 
+/// Lower bound on working precision. Precision that is too low can cause hard failures
+/// (stack overflow, SIGABRT), so the epsilon-derived estimate below is clamped up to this.
+/// The target accuracy is deliberately not tied to the working precision beyond this floor.
+pub const MIN_PREC_BITS: usize = 16;
+
+/// The working precision (in bits) this crate uses to hit a target accuracy
+/// `epsilon = epsilon_num / epsilon_den`. The magic factor 12 safely overapproximates the
+/// bits needed per decimal digit. Shared by [`config_from_theta_epsilon`] and the CLI
+/// (`main.rs`) so the two formulas cannot drift apart.
+///
+/// Note: this underflows (`usize` subtraction) for `epsilon >= 1`, a pre-existing limitation
+/// carried over unchanged from before this helper was extracted.
+pub fn prec_bits_for_epsilon(epsilon_num: &IBig, epsilon_den: &IBig) -> usize {
+    let calculated =
+        12 * (epsilon_den.ilog(&UBig::from(10u8)) - epsilon_num.ilog(&UBig::from(10u8)));
+    calculated.max(MIN_PREC_BITS)
+}
+
 /// Creates the default config to easily call the code from other rust packages.
 /// `seed` is used to set single RNG that is used through the call to `gridsynth`.
 pub fn config_from_theta_epsilon(
@@ -96,22 +123,17 @@ pub fn config_from_theta_epsilon(
 ) -> GridSynthConfig {
     let (theta_num, theta_den) = parse_decimal_with_exponent(&theta.to_string()).unwrap();
 
-    // The desired floating precision is initialized in module common.
-    // It has the initial value the first time this function is called.
-    // But, on subsequent calls, the precision has changed.
-    // We reset it so that the precison is the same at the beginning of every synthesis.
-    reset_prec_bits();
-    let theta = ib_to_bf_prec(theta_num) / ib_to_bf_prec(theta_den);
+    // `theta` is built at a fixed precision independent of the epsilon-derived working
+    // precision computed below -- reproducing this crate's historical precision lifecycle
+    // (theta used to be built right after a `reset_prec_bits()` to the crate's default,
+    // before `set_prec_bits` installed the epsilon-derived value). This is a known
+    // inconsistency, preserved here rather than fixed, so this refactor does not also change
+    // numeric output; see the module docs on working precision.
+    const THETA_PREC: Prec = Prec(1000);
+    let theta = THETA_PREC.ib(theta_num) / THETA_PREC.ib(theta_den);
     let (epsilon_num, epsilon_den) = parse_decimal_with_exponent(&epsilon.to_string()).unwrap();
-    // The magic number 12 safely overapproximates the bits of precision.
-    let calculated_prec_bits =
-        12 * (epsilon_den.ilog(&UBig::from(10u8)) - epsilon_num.ilog(&UBig::from(10u8)));
-    let prec_bits: usize = calculated_prec_bits;
-    // Using precision that is too low can cause errors. For example stack overflow and sigabrt.
-    // We don't actually need our target precision tied to working precision.
-    let prec_bits = if prec_bits < 16 { 16 } else { prec_bits };
-    set_prec_bits(prec_bits);
-    let epsilon = ib_to_bf_prec(epsilon_num) / ib_to_bf_prec(epsilon_den);
+    let prec = Prec(prec_bits_for_epsilon(&epsilon_num, &epsilon_den));
+    let epsilon = prec.ib(epsilon_num) / prec.ib(epsilon_den);
     let diophantine_timeout = 200u128;
     let factoring_timeout = 50u128;
     let time = false;
@@ -127,6 +149,7 @@ pub fn config_from_theta_epsilon(
     GridSynthConfig {
         theta,
         epsilon,
+        prec,
         verbose,
         measure_time: time,
         diophantine_data,

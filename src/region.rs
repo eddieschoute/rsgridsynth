@@ -1,7 +1,7 @@
 // Copyright (c) 2024-2025 Shun Yamamoto and Nobuyuki Yoshioka, and IBM
 // Licensed under the MIT License. See LICENSE file in the project root for full license information.
 
-use crate::common::{ib_to_bf_prec, pi};
+use crate::common::{pi, Prec};
 use dashu_float::round::mode::{self, HalfEven};
 use dashu_float::{Context, FBig};
 use dashu_int::IBig;
@@ -9,18 +9,18 @@ use nalgebra::{Matrix2, Vector2};
 use std::fmt;
 use std::ops::{Add, Div, Mul, Neg, Sub};
 
-use crate::common::{fb_with_prec, get_prec_bits};
 use std::fmt::{Debug, Display, Formatter};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Interval {
     pub l: FBig<HalfEven>,
     pub r: FBig<HalfEven>,
+    pub prec: Prec,
 }
 
 impl Interval {
-    pub fn new(l: FBig<HalfEven>, r: FBig<HalfEven>) -> Self {
-        Self { l, r }
+    pub fn new(l: FBig<HalfEven>, r: FBig<HalfEven>, prec: Prec) -> Self {
+        Self { l, r, prec }
     }
 
     pub fn width(&self) -> FBig<HalfEven> {
@@ -31,6 +31,7 @@ impl Interval {
         Self {
             l: &self.l - eps,
             r: &self.r + eps,
+            prec: self.prec,
         }
     }
 
@@ -39,16 +40,18 @@ impl Interval {
     }
 
     pub fn scale(&self, factor: &FBig<HalfEven>) -> Self {
-        let zero = ib_to_bf_prec(IBig::ZERO);
+        let zero = self.prec.ib(IBig::ZERO);
         if *factor >= zero {
             Self {
                 l: &self.l * factor,
                 r: &self.r * factor,
+                prec: self.prec,
             }
         } else {
             Self {
                 l: &self.r * factor,
                 r: &self.l * factor,
+                prec: self.prec,
             }
         }
     }
@@ -57,6 +60,7 @@ impl Interval {
         Interval {
             l: &self.l - x,
             r: &self.r - x,
+            prec: self.prec,
         }
     }
 }
@@ -74,6 +78,7 @@ impl Add for Interval {
         Self {
             l: &self.l + &rhs.l,
             r: &self.r + &rhs.r,
+            prec: self.prec,
         }
     }
 }
@@ -82,10 +87,11 @@ impl Add for Interval {
 impl Add<f64> for Interval {
     type Output = Self;
     fn add(self, rhs: f64) -> Self {
-        let rhs_float = FBig::<HalfEven>::try_from(rhs).unwrap();
+        let rhs_float = self.prec.fb(FBig::<HalfEven>::try_from(rhs).unwrap());
         Self {
             l: &self.l + &rhs_float,
             r: &self.r + &rhs_float,
+            prec: self.prec,
         }
     }
 }
@@ -97,6 +103,7 @@ impl Add<FBig<HalfEven>> for Interval {
         Self {
             l: &self.l + &rhs,
             r: &self.r + &rhs,
+            prec: self.prec,
         }
     }
 }
@@ -145,8 +152,9 @@ impl Sub<Interval> for FBig<HalfEven> {
 impl Sub<f64> for Interval {
     type Output = Interval;
     fn sub(self, rhs: f64) -> Interval {
-        let rhs_float = FBig::<HalfEven>::try_from(rhs).unwrap();
-        self + (-Interval::new(rhs_float.clone(), rhs_float))
+        let rhs_float = self.prec.fb(FBig::<HalfEven>::try_from(rhs).unwrap());
+        let prec = self.prec;
+        self + (-Interval::new(rhs_float.clone(), rhs_float, prec))
     }
 }
 
@@ -154,7 +162,8 @@ impl Sub<f64> for Interval {
 impl Sub<IBig> for Interval {
     type Output = Interval;
     fn sub(self, rhs: IBig) -> Interval {
-        self + (-Interval::new(ib_to_bf_prec(rhs.clone()), ib_to_bf_prec(rhs)))
+        let prec = self.prec;
+        self + (-Interval::new(prec.ib(rhs.clone()), prec.ib(rhs), prec))
     }
 }
 
@@ -162,7 +171,8 @@ impl Sub<IBig> for Interval {
 impl Sub<FBig<HalfEven>> for Interval {
     type Output = Interval;
     fn sub(self, rhs: FBig<HalfEven>) -> Interval {
-        self + (-Interval::new(rhs.clone(), rhs))
+        let prec = self.prec;
+        self + (-Interval::new(rhs.clone(), rhs, prec))
     }
 }
 
@@ -173,6 +183,7 @@ impl Neg for Interval {
         Self {
             l: -self.r,
             r: -self.l,
+            prec: self.prec,
         }
     }
 }
@@ -181,15 +192,18 @@ impl Neg for Interval {
 impl Mul<f64> for Interval {
     type Output = Interval;
     fn mul(self, rhs: f64) -> Interval {
+        let rhs_fbig = self.prec.fb(FBig::<HalfEven>::try_from(rhs).unwrap());
         if rhs >= 0.0 {
             Interval {
-                l: self.l * FBig::<HalfEven>::try_from(rhs).unwrap(),
-                r: self.r * FBig::<HalfEven>::try_from(rhs).unwrap(),
+                l: self.l * rhs_fbig.clone(),
+                r: self.r * rhs_fbig,
+                prec: self.prec,
             }
         } else {
             Interval {
-                l: self.r * FBig::<HalfEven>::try_from(rhs).unwrap(),
-                r: self.l * FBig::<HalfEven>::try_from(rhs).unwrap(),
+                l: self.r * rhs_fbig.clone(),
+                r: self.l * rhs_fbig,
+                prec: self.prec,
             }
         }
     }
@@ -199,15 +213,17 @@ impl Mul<f64> for Interval {
 impl Mul<FBig<HalfEven>> for Interval {
     type Output = Interval;
     fn mul(self, rhs: FBig<HalfEven>) -> Interval {
-        if rhs >= ib_to_bf_prec(IBig::ZERO) {
+        if rhs >= self.prec.ib(IBig::ZERO) {
             Interval {
                 l: self.l * rhs.clone(),
                 r: self.r * rhs,
+                prec: self.prec,
             }
         } else {
             Interval {
                 l: self.r * rhs.clone(),
                 r: self.l * rhs,
+                prec: self.prec,
             }
         }
     }
@@ -233,15 +249,17 @@ impl Mul<Interval> for FBig<HalfEven> {
 impl Div<FBig<HalfEven>> for Interval {
     type Output = Interval;
     fn div(self, rhs: FBig<HalfEven>) -> Interval {
-        if rhs > ib_to_bf_prec(IBig::ZERO) {
+        if rhs > self.prec.ib(IBig::ZERO) {
             Interval {
                 l: self.l / rhs.clone(),
                 r: self.r / rhs,
+                prec: self.prec,
             }
         } else {
             Interval {
                 l: self.r / rhs.clone(),
                 r: self.l / rhs,
+                prec: self.prec,
             }
         }
     }
@@ -259,10 +277,11 @@ impl Rectangle {
         x_r: FBig<HalfEven>,
         y_l: FBig<HalfEven>,
         y_r: FBig<HalfEven>,
+        prec: Prec,
     ) -> Self {
         Self {
-            x: Interval::new(x_l, x_r),
-            y: Interval::new(y_l, y_r),
+            x: Interval::new(x_l, x_r, prec),
+            y: Interval::new(y_l, y_r, prec),
         }
     }
 
@@ -271,7 +290,7 @@ impl Rectangle {
     }
 
     fn scale(&self, factor: FBig<HalfEven>) -> Self {
-        if factor >= ib_to_bf_prec(IBig::ZERO) {
+        if factor >= self.x.prec.ib(IBig::ZERO) {
             Self {
                 x: self.x.scale(&factor),
                 y: self.y.scale(&factor),
@@ -313,11 +332,12 @@ impl Mul<Rectangle> for FBig<HalfEven> {
 pub struct Ellipse {
     pub d: Matrix2<FBig<HalfEven>>,
     pub p: Vector2<FBig<HalfEven>>,
+    pub prec: Prec,
 }
 
 impl Ellipse {
-    pub fn new(d: Matrix2<FBig<HalfEven>>, p: Vector2<FBig<HalfEven>>) -> Self {
-        Self { d, p }
+    pub fn new(d: Matrix2<FBig<HalfEven>>, p: Vector2<FBig<HalfEven>>, prec: Prec) -> Self {
+        Self { d, p, prec }
     }
 
     pub fn from(
@@ -327,10 +347,12 @@ impl Ellipse {
         d11: FBig<HalfEven>,
         px: FBig<HalfEven>,
         py: FBig<HalfEven>,
+        prec: Prec,
     ) -> Self {
         Self {
             d: Matrix2::new(d00, d01, d10, d11),
             p: Vector2::new(px, py),
+            prec,
         }
     }
 
@@ -379,11 +401,11 @@ impl Ellipse {
 
         let sum12 = &term1 + &term2;
         let value = &sum12 + &term3;
-        value <= fb_with_prec(FBig::<HalfEven>::from(1))
+        value <= self.prec.fb(FBig::<HalfEven>::from(1))
     }
 
     pub fn bbox(&self) -> Rectangle {
-        let ctx: Context<mode::HalfEven> = Context::<mode::HalfEven>::new(get_prec_bits());
+        let ctx: Context<mode::HalfEven> = self.prec.ctx();
         let sqrt_det = self.sqrt_det();
         let w = ctx.sqrt(self.d().repr()).value() / &sqrt_det;
         let h = ctx.sqrt(self.a().repr()).value() / &sqrt_det;
@@ -392,26 +414,30 @@ impl Ellipse {
         let py_minus_h = self.py() - &h;
         let py_plus_h = self.py() + &h;
         Rectangle {
-            x: Interval::new(px_minus_w, px_plus_w),
-            y: Interval::new(py_minus_h, py_plus_h),
+            x: Interval::new(px_minus_w, px_plus_w, self.prec),
+            y: Interval::new(py_minus_h, py_plus_h, self.prec),
         }
     }
 
     pub fn sqrt_det(&self) -> FBig<HalfEven> {
-        let ctx: Context<mode::HalfEven> = Context::<mode::HalfEven>::new(get_prec_bits());
+        let ctx: Context<mode::HalfEven> = self.prec.ctx();
         let det = self.d() * self.a() - self.b().powi(IBig::from(2));
         ctx.sqrt(det.repr()).value()
     }
 
     pub fn area(&self) -> FBig<HalfEven> {
-        pi() / self.sqrt_det()
+        pi(self.prec) / self.sqrt_det()
     }
 
     pub fn normalize(&self) -> Self {
-        let ctx: Context<mode::HalfEven> = Context::<mode::HalfEven>::new(get_prec_bits());
+        let ctx: Context<mode::HalfEven> = self.prec.ctx();
         let factor = self.sqrt_det();
         let factor_sqrt = ctx.sqrt(factor.repr()).value();
-        Ellipse::new(self.d.clone() / factor, self.p.clone() * factor_sqrt)
+        Ellipse::new(
+            self.d.clone() / factor,
+            self.p.clone() * factor_sqrt,
+            self.prec,
+        )
     }
 }
 
@@ -421,7 +447,7 @@ impl Mul<FBig<HalfEven>> for Ellipse {
     fn mul(self, rhs: FBig<HalfEven>) -> Ellipse {
         let inv_rhs: FBig<HalfEven> = 1 / &rhs;
         let inv_rhs_sq = inv_rhs.powi(IBig::from(2));
-        Ellipse::new(self.d * inv_rhs_sq, self.p * rhs)
+        Ellipse::new(self.d * inv_rhs_sq, self.p * rhs, self.prec)
     }
 }
 
@@ -438,7 +464,7 @@ impl Div<FBig<HalfEven>> for Ellipse {
     type Output = Ellipse;
     fn div(self, rhs: FBig<HalfEven>) -> Ellipse {
         let rhs_sq = rhs.clone().powi(IBig::from(2));
-        Ellipse::new(self.d * rhs_sq, self.p / rhs)
+        Ellipse::new(self.d * rhs_sq, self.p / rhs, self.prec)
     }
 }
 

@@ -6,6 +6,7 @@ use dashu_float::round::mode::HalfEven;
 use dashu_float::FBig;
 use dashu_int::IBig;
 
+use crate::common::Prec;
 use crate::math::{ntz, pow_sqrt2};
 use crate::ring::z_root_two::ZRootTwo;
 use crate::ring::DOmega;
@@ -63,8 +64,8 @@ impl DRootTwo {
         self.alpha.parity()
     }
 
-    pub fn scale(&self) -> FBig<HalfEven> {
-        pow_sqrt2(self.k)
+    pub fn scale(&self, prec: Prec) -> FBig<HalfEven> {
+        pow_sqrt2(prec, self.k)
     }
 
     pub fn squared_scale(&self) -> IBig {
@@ -72,8 +73,8 @@ impl DRootTwo {
         IBig::ONE << k
     }
 
-    pub fn to_real(&self) -> FBig<HalfEven> {
-        self.alpha.to_real() / self.scale()
+    pub fn to_real(&self, prec: Prec) -> FBig<HalfEven> {
+        self.alpha.to_real(prec) / self.scale(prec)
     }
 
     pub fn conj_sq2(&self) -> Self {

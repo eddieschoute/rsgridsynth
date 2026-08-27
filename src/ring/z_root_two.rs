@@ -1,7 +1,7 @@
 // Copyright (c) 2024-2025 Shun Yamamoto and Nobuyuki Yoshioka, and IBM
 // Licensed under the MIT License. See LICENSE file in the project root for full license information.
 
-use crate::common::ib_to_bf_prec;
+use crate::common::Prec;
 use crate::math::{floorsqrt, rounddiv, sign, sqrt2};
 use crate::ring::ZOmega;
 use dashu_base::Sign;
@@ -71,8 +71,8 @@ impl ZRootTwo {
         &self.a * &self.a - IBig::from(2) * &self.b * &self.b
     }
 
-    pub fn to_real(&self) -> FBig<HalfEven> {
-        &self.a + sqrt2() * &self.b
+    pub fn to_real(&self, prec: Prec) -> FBig<HalfEven> {
+        &self.a + sqrt2(prec) * &self.b
     }
 
     pub fn conj_sq2(&self) -> Self {
@@ -104,19 +104,19 @@ impl ZRootTwo {
         }
     }
 
-    pub fn sqrt(&self) -> Option<Self> {
-        let norm = ib_to_bf_prec(self.norm());
-        if norm < ib_to_bf_prec(IBig::ZERO) || self.a < IBig::ZERO {
+    pub fn sqrt(&self, prec: Prec) -> Option<Self> {
+        let norm = prec.ib(self.norm());
+        if norm < prec.ib(IBig::ZERO) || self.a < IBig::ZERO {
             return None;
         }
-        let r = floorsqrt(norm);
-        let a1 = floorsqrt(ib_to_bf_prec((&self.a + &r) / IBig::from(2)));
-        let b1 = floorsqrt(ib_to_bf_prec((&self.a - &r) / IBig::from(4)));
-        let a2 = floorsqrt(ib_to_bf_prec((&self.a - &r) / IBig::from(2)));
-        let b2 = floorsqrt(ib_to_bf_prec((&self.a + &r) / IBig::from(4)));
+        let r = floorsqrt(prec, norm);
+        let a1 = floorsqrt(prec, prec.ib((&self.a + &r) / IBig::from(2)));
+        let b1 = floorsqrt(prec, prec.ib((&self.a - &r) / IBig::from(4)));
+        let a2 = floorsqrt(prec, prec.ib((&self.a - &r) / IBig::from(2)));
+        let b2 = floorsqrt(prec, prec.ib((&self.a + &r) / IBig::from(4)));
 
         let (w1, w2) =
-            if sign(ib_to_bf_prec(self.a.clone())) * sign(ib_to_bf_prec(self.b.clone())) >= 0 {
+            if sign(prec, prec.ib(self.a.clone())) * sign(prec, prec.ib(self.b.clone())) >= 0 {
                 (Self::new(a1, b1), Self::new(a2, b2))
             } else {
                 (Self::new(a1, -b1), Self::new(a2, -b2))

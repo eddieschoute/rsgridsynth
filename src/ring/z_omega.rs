@@ -5,7 +5,7 @@ use dashu_float::round::mode::HalfEven;
 use dashu_float::FBig;
 use dashu_int::IBig;
 
-use crate::common::ib_to_bf_prec;
+use crate::common::Prec;
 use crate::math::sqrt2;
 use crate::ring::ZRootTwo;
 use std::cell::OnceCell;
@@ -106,12 +106,12 @@ impl ZOmega {
         Self::new(-x.b.clone(), IBig::ZERO, x.b.clone(), x.a.clone())
     }
 
-    pub fn real(&self) -> FBig<HalfEven> {
-        ib_to_bf_prec(self.d.clone()) + sqrt2() * (&self.c - &self.a) / 2
+    pub fn real(&self, prec: Prec) -> FBig<HalfEven> {
+        prec.ib(self.d.clone()) + sqrt2(prec) * (&self.c - &self.a) / 2
     }
 
-    pub fn imag(&self) -> FBig<HalfEven> {
-        ib_to_bf_prec(self.b.clone()) + sqrt2() * (&self.c + &self.a) / 2
+    pub fn imag(&self, prec: Prec) -> FBig<HalfEven> {
+        prec.ib(self.b.clone()) + sqrt2(prec) * (&self.c + &self.a) / 2
     }
 
     pub fn mul_by_omega(&self) -> Self {

@@ -104,7 +104,7 @@ fn fuzz_mixed_diagonal_accuracy() {
 #[serial]
 fn fuzz_fallback_accuracy() {
     let q = exact_q(7);
-    let q_real_f64 = fbig_to_f64(&q.to_real());
+    let q_real_f64 = fbig_to_f64(&q.to_real(rsgridsynth::common::Prec(1000)));
     let thetas = random_angles(0xFA11_0002, 6);
     for &epsilon in &EPSILONS {
         for &theta in &thetas {
@@ -148,7 +148,7 @@ fn fuzz_fallback_accuracy() {
 #[serial]
 fn fuzz_mixed_fallback_accuracy() {
     let q = exact_q(7);
-    let q_real_f64 = fbig_to_f64(&q.to_real());
+    let q_real_f64 = fbig_to_f64(&q.to_real(rsgridsynth::common::Prec(1000)));
     let thetas = random_angles(0xFA11_0003, 6);
     for &epsilon in &EPSILONS {
         for &theta in &thetas {
@@ -158,7 +158,7 @@ fn fuzz_mixed_fallback_accuracy() {
             let theta_fbig = theta_at_matching_precision(theta, epsilon);
 
             match &result {
-                MixedFallbackResult::Exact { gates } => {
+                MixedFallbackResult::Exact { gates, .. } => {
                     assert!(
                         !gates.is_empty(),
                         "theta={theta}, epsilon={epsilon:e}: exact result has empty gates"

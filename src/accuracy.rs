@@ -14,7 +14,7 @@
 //! not an independent derivation from a different method. `examples/pauli_transfer_verification.rs`
 //! implements a genuinely independent (Pauli-transfer-matrix-based) check, for that purpose.
 
-use crate::common::{cos_fbig, fb_with_prec, ib_to_bf_prec, sin_fbig};
+use crate::common::{cos_fbig, sin_fbig, Prec};
 use crate::gate::Gate;
 use crate::math::sqrt_fbig;
 use crate::ring::DOmega;
@@ -40,18 +40,19 @@ use num::Complex;
 pub struct WFrame {
     z_x: FBig<HalfEven>,
     z_y: FBig<HalfEven>,
+    prec: Prec,
 }
 
 impl WFrame {
     /// Builds the rotated frame for target angle `theta`, computing `z_x = cos(-theta/2)`,
     /// `z_y = sin(-theta/2)` exactly as `EpsilonRegion::new` does.
-    pub fn new(theta: &FBig<HalfEven>) -> Self {
-        let two = fb_with_prec(FBig::try_from(2.0).unwrap());
-        let theta_half = fb_with_prec(theta / &two);
-        let neg_theta_half = -fb_with_prec(theta_half);
-        let z_x: FBig<HalfEven> = fb_with_prec(cos_fbig(&neg_theta_half));
-        let z_y: FBig<HalfEven> = fb_with_prec(sin_fbig(&neg_theta_half));
-        Self { z_x, z_y }
+    pub fn new(prec: Prec, theta: &FBig<HalfEven>) -> Self {
+        let two = prec.fb(FBig::try_from(2.0).unwrap());
+        let theta_half = prec.fb(theta / &two);
+        let neg_theta_half = -prec.fb(theta_half);
+        let z_x: FBig<HalfEven> = prec.fb(cos_fbig(prec, &neg_theta_half));
+        let z_y: FBig<HalfEven> = prec.fb(sin_fbig(prec, &neg_theta_half));
+        Self { z_x, z_y, prec }
     }
 
     /// Builds the same frame as [`WFrame::new`], but from the target direction's half-angle
@@ -66,8 +67,12 @@ impl WFrame {
     /// declaring `protocol`) never compiles -- hence `allow(dead_code)`, since that
     /// compilation would otherwise warn on this method despite it being used elsewhere.
     #[allow(dead_code)]
-    pub(crate) fn from_target_direction(z_x: FBig<HalfEven>, z_y: FBig<HalfEven>) -> Self {
-        Self { z_x, z_y }
+    pub(crate) fn from_target_direction(
+        prec: Prec,
+        z_x: FBig<HalfEven>,
+        z_y: FBig<HalfEven>,
+    ) -> Self {
+        Self { z_x, z_y, prec }
     }
 
     /// `Re(w)` where `w = u * e^{i theta/2}`, for `u` already expressed as an `FBig` complex
@@ -75,38 +80,38 @@ impl WFrame {
     /// element, e.g. after rotating by an extra phase that isn't ring-representable (like the
     /// `e^{i pi/8}` shift `PhaseMode::Shifted` uses).
     pub fn re_w_fbig(&self, re: &FBig<HalfEven>, im: &FBig<HalfEven>) -> FBig<HalfEven> {
-        let term1 = fb_with_prec(&self.z_x * re);
-        let term2 = fb_with_prec(&self.z_y * im);
-        fb_with_prec(&term1 + &term2)
+        let term1 = self.prec.fb(&self.z_x * re);
+        let term2 = self.prec.fb(&self.z_y * im);
+        self.prec.fb(&term1 + &term2)
     }
 
     /// `Re(w)` where `w = u * e^{i theta/2}`. Matches `EpsilonRegion`'s existing
     /// `cos_similarity` exactly (same formula, same operand order).
     pub fn re_w(&self, u: &DOmega) -> FBig<HalfEven> {
-        self.re_w_fbig(u.real(), u.imag())
+        self.re_w_fbig(u.real(self.prec), u.imag(self.prec))
     }
 
     /// `Im(w)` where `w = u * e^{i theta/2}`.
     pub fn im_w(&self, u: &DOmega) -> FBig<HalfEven> {
-        let term1 = fb_with_prec(&self.z_x * u.imag());
-        let term2 = fb_with_prec(&self.z_y * u.real());
-        fb_with_prec(&term1 - &term2)
+        let term1 = self.prec.fb(&self.z_x * u.imag(self.prec));
+        let term2 = self.prec.fb(&self.z_y * u.real(self.prec));
+        self.prec.fb(&term1 - &term2)
     }
 }
 
 /// Exact diamond-norm distance between a target Z-rotation and its diagonal-unitary
 /// approximation, given only the achieved `Re(w)` (`w = u * e^{i theta/2}`, see
 /// [`WFrame::re_w`]): `||Z_phi - U||_diamond = 2*sqrt(1 - Re(w)^2)`.
-pub fn diagonal_diamond_distance(re_w: &FBig<HalfEven>) -> FBig<HalfEven> {
-    let one = ib_to_bf_prec(IBig::ONE);
-    let re_w_sq = fb_with_prec(re_w * re_w);
-    let one_minus_re_w_sq = fb_with_prec(&one - &re_w_sq);
+pub fn diagonal_diamond_distance(prec: Prec, re_w: &FBig<HalfEven>) -> FBig<HalfEven> {
+    let one = prec.ib(IBig::ONE);
+    let re_w_sq = prec.fb(re_w * re_w);
+    let one_minus_re_w_sq = prec.fb(&one - &re_w_sq);
     // Guard against tiny negative values from rounding error, matching the analogous
     // clamp in `gridsynth::compute_error`.
-    let zero = ib_to_bf_prec(IBig::ZERO);
+    let zero = prec.ib(IBig::ZERO);
     let clamped = one_minus_re_w_sq.max(zero);
-    let two = fb_with_prec(FBig::try_from(2.0).unwrap());
-    fb_with_prec(&two * sqrt_fbig(&clamped))
+    let two = prec.fb(FBig::try_from(2.0).unwrap());
+    prec.fb(&two * sqrt_fbig(prec, &clamped))
 }
 
 /// Decodes `gates`, optionally rotating the decoded top-left entry by the extra `e^{i pi/8}`
@@ -114,24 +119,25 @@ pub fn diagonal_diamond_distance(re_w: &FBig<HalfEven>) -> FBig<HalfEven> {
 /// to happen in `FBig` on the decoded complex entry rather than in exact ring arithmetic), and
 /// returns the diamond-norm distance to the ideal target rotation by `theta`.
 pub(crate) fn gate_seq_diamond_error(
+    prec: Prec,
     theta: &FBig<HalfEven>,
     gates: &[Gate],
     extra_eighth_turn: bool,
 ) -> FBig<HalfEven> {
-    let wframe = WFrame::new(theta);
+    let wframe = WFrame::new(prec, theta);
     let u = DOmegaUnitary::from_gates(gates);
 
     let re_w = if extra_eighth_turn {
-        let p = fb_with_prec(FBig::<HalfEven>::try_from(std::f64::consts::PI / 8.).unwrap());
-        let phase = Complex::new(fb_with_prec(cos_fbig(&p)), fb_with_prec(sin_fbig(&p)));
-        let z = Complex::new(u.z().real().clone(), u.z().imag().clone());
+        let p = prec.fb(FBig::<HalfEven>::try_from(std::f64::consts::PI / 8.).unwrap());
+        let phase = Complex::new(prec.fb(cos_fbig(prec, &p)), prec.fb(sin_fbig(prec, &p)));
+        let z = Complex::new(u.z().real(prec).clone(), u.z().imag(prec).clone());
         let shifted = &z * &phase;
         wframe.re_w_fbig(&shifted.re, &shifted.im)
     } else {
         wframe.re_w(u.z())
     };
 
-    diagonal_diamond_distance(&re_w)
+    diagonal_diamond_distance(prec, &re_w)
 }
 
 /// Decodes `gates` back into the unitary it represents and returns the diamond-norm distance
@@ -143,8 +149,12 @@ pub(crate) fn gate_seq_diamond_error(
 /// straight from its public gate string, without re-deriving `WFrame`/`Re(w)` inline -- and so
 /// that check exercises the actual gate-encode/decode round trip (`decompose_domega_unitary`
 /// followed by `DOmegaUnitary::from_gates`), not just the value computed mid-search.
-pub fn achieved_diagonal_diamond_error(theta: &FBig<HalfEven>, gates: &[Gate]) -> FBig<HalfEven> {
-    gate_seq_diamond_error(theta, gates, false)
+pub fn achieved_diagonal_diamond_error(
+    prec: Prec,
+    theta: &FBig<HalfEven>,
+    gates: &[Gate],
+) -> FBig<HalfEven> {
+    gate_seq_diamond_error(prec, theta, gates, false)
 }
 
 /// Like [`achieved_diagonal_diamond_error`], but normalizes the decoded top-left entry's
@@ -160,18 +170,22 @@ pub fn achieved_diagonal_diamond_error(theta: &FBig<HalfEven>, gates: &[Gate]) -
 /// `diagonal_diamond_distance` conflates that magnitude deficit with angular error, giving a
 /// nonsensical, epsilon-independent `~2*sqrt(1-q)` answer instead of the actual (typically much
 /// smaller) angular error.
-pub fn achieved_phase_diamond_error(theta: &FBig<HalfEven>, gates: &[Gate]) -> FBig<HalfEven> {
+pub fn achieved_phase_diamond_error(
+    prec: Prec,
+    theta: &FBig<HalfEven>,
+    gates: &[Gate],
+) -> FBig<HalfEven> {
     let u = DOmegaUnitary::from_gates(gates);
     let z = u.z();
     let norm_sq =
-        fb_with_prec(fb_with_prec(z.real() * z.real()) + fb_with_prec(z.imag() * z.imag()));
-    let norm = sqrt_fbig(&norm_sq);
-    let re_n = fb_with_prec(z.real() / &norm);
-    let im_n = fb_with_prec(z.imag() / &norm);
+        prec.fb(prec.fb(z.real(prec) * z.real(prec)) + prec.fb(z.imag(prec) * z.imag(prec)));
+    let norm = sqrt_fbig(prec, &norm_sq);
+    let re_n = prec.fb(z.real(prec) / &norm);
+    let im_n = prec.fb(z.imag(prec) / &norm);
 
-    let wframe = WFrame::new(theta);
+    let wframe = WFrame::new(prec, theta);
     let re_w = wframe.re_w_fbig(&re_n, &im_n);
-    diagonal_diamond_distance(&re_w)
+    diagonal_diamond_distance(prec, &re_w)
 }
 
 /// Implemented by result types whose diamond-norm distance to an ideal Z-rotation by `theta`

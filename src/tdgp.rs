@@ -5,7 +5,7 @@ use dashu_float::round::mode::HalfEven;
 use dashu_float::FBig;
 use dashu_int::IBig;
 
-use crate::common::{fb_with_prec, ib_to_bf_prec};
+use crate::common::Prec;
 use crate::grid_op::GridOp;
 use crate::odgp::{
     first_solve_scaled_odgp, solve_scaled_odgp, solve_scaled_odgp_with_parity_k_ne_0,
@@ -35,6 +35,7 @@ pub fn solve_tdgp<'a>(
     k: i64,
     _verbose: bool,
 ) -> Option<impl Iterator<Item = DOmega> + 'a> {
+    let prec = bbox_a.x.prec;
     let alpha0 = first_solve_scaled_odgp(&bbox_a.x, &bbox_b.x, k + 1)?;
     let _k_ibig = IBig::from(k);
     let dx = DRootTwo::power_of_inv_sqrt2(k);
@@ -47,16 +48,25 @@ pub fn solve_tdgp<'a>(
 
     let bbox_a_new = bbox_a
         .y
-        .fatten(&(bbox_a.y.width() / ib_to_bf_prec(IBig::from(10000))));
+        .fatten(&(bbox_a.y.width() / prec.ib(IBig::from(10000))));
     let bbox_b_new = bbox_b
         .y
-        .fatten(&(bbox_b.y.width() / ib_to_bf_prec(IBig::from(10000))));
+        .fatten(&(bbox_b.y.width() / prec.ib(IBig::from(10000))));
     let sol_y = solve_scaled_odgp(&bbox_a_new, &bbox_b_new, k + 1);
 
     let sol_sufficient = sol_y.flat_map(move |y| {
-        newproc(y, set_a, set_b, op_g, alpha0.clone(), v_conj_sq2.clone(), k)
-            .into_iter()
-            .flatten()
+        newproc(
+            prec,
+            y,
+            set_a,
+            set_b,
+            op_g,
+            alpha0.clone(),
+            v_conj_sq2.clone(),
+            k,
+        )
+        .into_iter()
+        .flatten()
     });
 
     let solutions = sol_sufficient
@@ -65,7 +75,11 @@ pub fn solve_tdgp<'a>(
     Some(solutions)
 }
 
+// `prec` becoming explicit (no ambient/global precision anywhere in this crate) pushed this
+// already-large private helper from 7 to 8 parameters.
+#[allow(clippy::too_many_arguments)]
 fn newproc<'a>(
+    prec: Prec,
     beta: DRootTwo,
     set_a: &'a impl Region,
     set_b: &'a impl Region,
@@ -90,9 +104,12 @@ fn newproc<'a>(
     let (t_a, t_b) = (t_a.unwrap(), t_b.unwrap());
 
     let parity = (&beta - &alpha0).mul_by_sqrt2_power_renewing_denomexp(k);
-    let (mut int_a, mut int_b) = (Interval::new(t_a.0, t_a.1), Interval::new(t_b.0, t_b.1));
-    let dt_a = get_dt_x(k, &int_b);
-    let dt_b = get_dt_x(k, &int_a);
+    let (mut int_a, mut int_b) = (
+        Interval::new(t_a.0, t_a.1, prec),
+        Interval::new(t_b.0, t_b.1, prec),
+    );
+    let dt_a = get_dt_x(prec, k, &int_b);
+    let dt_b = get_dt_x(prec, k, &int_a);
     int_a = int_a.fatten(&dt_a);
     int_b = int_b.fatten(&dt_b);
 
@@ -102,8 +119,8 @@ fn newproc<'a>(
     Some(sol_xx)
 }
 
-fn get_dt_x(k: i64, int_y: &Interval) -> FBig<HalfEven> {
-    let ten = ib_to_bf_prec(IBig::from(10));
+fn get_dt_x(prec: Prec, k: i64, int_y: &Interval) -> FBig<HalfEven> {
+    let ten = prec.ib(IBig::from(10));
     let shift_k = IBig::from(1) << (k as usize);
     let width_product = shift_k * int_y.width();
     let max_val = {
@@ -113,5 +130,5 @@ fn get_dt_x(k: i64, int_y: &Interval) -> FBig<HalfEven> {
             &width_product
         }
     };
-    fb_with_prec(&ten / max_val)
+    prec.fb(&ten / max_val)
 }
