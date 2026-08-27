@@ -1,5 +1,6 @@
 use crate::common::ib_to_bf_prec;
 use crate::common::{reset_prec_bits, set_prec_bits};
+use crate::diophantine::Caches;
 use crate::gate::GateSeq;
 use dashu_float::round::mode::HalfEven;
 use dashu_float::FBig;
@@ -12,6 +13,9 @@ pub struct DiophantineData {
     pub diophantine_timeout: u128,
     pub factoring_timeout: u128,
     pub rng: StdRng,
+    /// Memo caches for the number-theoretic search, owned by this config so concurrent
+    /// syntheses never share them. See [`Caches`].
+    pub caches: Caches,
 }
 
 #[derive(Debug)]
@@ -117,6 +121,7 @@ pub fn config_from_theta_epsilon(
         diophantine_timeout,
         factoring_timeout,
         rng,
+        caches: Caches::default(),
     };
 
     GridSynthConfig {

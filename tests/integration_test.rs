@@ -1,7 +1,6 @@
 use dashu_float::round::mode::HalfEven;
 use dashu_float::FBig;
 use rsgridsynth::accuracy::AchievedDiamondError;
-use rsgridsynth::clear_caches;
 use rsgridsynth::config::config_from_theta_epsilon;
 use rsgridsynth::gridsynth::gridsynth_gates;
 use serial_test::serial;
@@ -31,7 +30,6 @@ fn simple_test() {
     let verbose = false;
     let up_to_phase = false;
     for (seed, expected_gates) in test_inputs {
-        clear_caches();
         let mut gridsynth_config =
             config_from_theta_epsilon(theta, epsilon, seed, verbose, up_to_phase);
         let gates = gridsynth_gates(&mut gridsynth_config).gates;
@@ -57,7 +55,6 @@ fn pi_over_two_test() {
     for epsilon in epsilons {
         let seeds = 10..50;
         for seed in seeds {
-            clear_caches();
             let mut gridsynth_config =
                 config_from_theta_epsilon(theta, epsilon, seed, verbose, up_to_phase);
             let gates = gridsynth_gates(&mut gridsynth_config).gates;
@@ -76,7 +73,6 @@ fn pi_over_4_exact_test() {
     let seed = 1234;
     let up_to_phase = false;
     let verbose = false;
-    clear_caches();
     let mut gridsynth_config =
         config_from_theta_epsilon(theta, epsilon, seed, verbose, up_to_phase);
     let gates = gridsynth_gates(&mut gridsynth_config).gates;
@@ -94,7 +90,6 @@ fn pi_over_4_with_phase_test() {
     let seed = 1234;
     let up_to_phase = true;
     let verbose = false;
-    clear_caches();
     let mut gridsynth_config =
         config_from_theta_epsilon(theta, epsilon, seed, verbose, up_to_phase);
     let gates = gridsynth_gates(&mut gridsynth_config).gates;
@@ -109,7 +104,6 @@ fn pi_over_4_with_phase_test() {
 fn public_api_gates_round_trip_through_display_and_parse() {
     let theta = std::f64::consts::PI / 8.0;
     let epsilon = 1e-10;
-    clear_caches();
     let mut gridsynth_config = config_from_theta_epsilon(theta, epsilon, 1234, false, false);
     let res = gridsynth_gates(&mut gridsynth_config);
 
@@ -129,7 +123,6 @@ fn test_correct_decomposition_exact() {
     let thetas = (0..64).map(|k| k as f64 * std::f64::consts::PI / 32.0);
 
     for theta in thetas {
-        clear_caches();
         let mut gridsynth_config =
             config_from_theta_epsilon(theta, epsilon, seed, verbose, up_to_phase);
 
@@ -162,7 +155,6 @@ fn test_correct_decomposition_up_to_phase() {
     let thetas = (0..64).map(|k| k as f64 * std::f64::consts::PI / 32.0);
 
     for theta in thetas {
-        clear_caches();
         let mut gridsynth_config =
             config_from_theta_epsilon(theta, epsilon, seed, verbose, up_to_phase);
 
@@ -204,7 +196,6 @@ fn test_shared_cache_across_denomexp_no_panic() {
     let mut incorrect_thetas = Vec::new();
     let mut max_error = 0.0_f64;
 
-    clear_caches();
     for i in 1..=320 {
         let theta = i as f64 * 0.01;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -247,7 +238,6 @@ fn test_timeouts_preserved_after_synthesis() {
     gridsynth_config.diophantine_data.diophantine_timeout = 237;
     gridsynth_config.diophantine_data.factoring_timeout = 61;
 
-    clear_caches();
     let result = gridsynth_gates(&mut gridsynth_config);
 
     assert!(!result.gates.is_empty());

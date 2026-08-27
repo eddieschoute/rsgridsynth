@@ -393,7 +393,6 @@ mod tests {
     #[serial]
     fn degenerate_angle_produces_a_valid_result() {
         reset_prec_bits();
-        crate::clear_caches();
         let q = exact_q(7);
         let result = synth_mixed_fallback(PI / 2.0, 1e-6, q, 11, false)
             .expect("search should succeed for theta=pi/2");
@@ -415,7 +414,6 @@ mod tests {
     #[serial]
     fn generic_angle_produces_mixed_result_with_valid_structure() {
         reset_prec_bits();
-        crate::clear_caches();
         let q = exact_q(7);
         let result = synth_mixed_fallback(3.0 * PI / 32.0, 1e-6, q.clone(), 13, false)
             .expect("search should succeed for a generic angle");
@@ -456,7 +454,6 @@ mod tests {
     #[serial]
     fn mixed_fallback_expected_cost_slope() {
         reset_prec_bits();
-        crate::clear_caches();
         let q = exact_q(7);
         let epsilons: [f64; 3] = [1e-4, 1e-6, 1e-8];
         let n_angles = 6;
@@ -467,7 +464,6 @@ mod tests {
         for &eps in &epsilons {
             for i in 0..n_angles {
                 let theta = (0.29 + (i as f64) * 0.83 + eps.log10()) % (2.0 * PI);
-                crate::clear_caches();
                 let Some(result) =
                     synth_mixed_fallback(theta, eps, q.clone(), 100 + i as u64, false)
                 else {

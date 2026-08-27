@@ -656,7 +656,6 @@ mod tests {
     #[test]
     #[serial]
     fn candidate_stats_are_populated_when_provided() {
-        crate::clear_caches();
         let theta = std::f64::consts::PI / 8.0;
         let epsilon = 1e-10;
         let mut config = config_from_theta_epsilon(theta, epsilon, 1234, false, false);

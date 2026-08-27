@@ -21,7 +21,6 @@ use num::Complex;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rsgridsynth::accuracy::AchievedDiamondError;
-use rsgridsynth::clear_caches;
 use rsgridsynth::common::{cos_fbig, fb_with_prec, get_prec_bits, sin_fbig};
 use rsgridsynth::config::config_from_theta_epsilon;
 use rsgridsynth::gate::Gate;
@@ -93,7 +92,6 @@ fn run_accuracy_fuzz(up_to_phase: bool, thetas_per_epsilon: usize, seeds: &[u64]
         for _ in 0..thetas_per_epsilon {
             let theta = rng.random_range(0.0..std::f64::consts::TAU);
             for &seed in seeds {
-                clear_caches();
                 let mut config =
                     config_from_theta_epsilon(theta, epsilon, seed, false, up_to_phase);
                 let res = gridsynth_gates(&mut config);
@@ -160,7 +158,6 @@ fn fuzz_accuracy_at_1e_minus_15() {
 
     for _ in 0..40 {
         let theta = rng.random_range(0.0..std::f64::consts::TAU);
-        clear_caches();
         let mut config = config_from_theta_epsilon(theta, epsilon, 42, false, false);
         let res = gridsynth_gates(&mut config);
 

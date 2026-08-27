@@ -23,7 +23,7 @@ pub mod tdgp;
 pub mod to_upright;
 pub mod unitary;
 
-pub use diophantine::clear_caches;
+pub use diophantine::Caches;
 
 use std::{f32::consts::LOG2_10, time::Instant};
 
@@ -162,6 +162,7 @@ fn parse_arguments(matches: &clap::ArgMatches) -> GridSynthConfig {
         diophantine_timeout,
         factoring_timeout,
         rng,
+        caches: Caches::default(),
     };
 
     GridSynthConfig {

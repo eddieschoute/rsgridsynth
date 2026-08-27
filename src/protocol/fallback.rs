@@ -772,7 +772,6 @@ mod tests {
     #[test]
     #[serial]
     fn fallback_result_meets_success_probability_guarantee() {
-        crate::clear_caches();
         let q = exact_q(7);
         for (theta, eps_diamond) in [
             (PI / 8.0, 1e-4),
@@ -780,7 +779,6 @@ mod tests {
             (1.0_f64, 1e-4),
             (-0.5_f64, 1e-5),
         ] {
-            crate::clear_caches();
             let sin_alpha = eps_diamond / 4.0;
             let result = synth_fallback(theta, eps_diamond, q.clone(), sin_alpha, 42, false)
                 .expect("expected a solution within budget");
@@ -803,7 +801,6 @@ mod tests {
     #[test]
     #[serial]
     fn fallback_expected_cost_slope() {
-        crate::clear_caches();
         let q = exact_q(7);
         let epsilons: [f64; 3] = [1e-4, 1e-6, 1e-8];
         let n_angles = 8;
@@ -820,7 +817,6 @@ mod tests {
                 let theta = 0.37 + (i as f64) * 0.91 + eps.log10();
                 let theta = theta % (2.0 * PI);
 
-                crate::clear_caches();
                 let Some(result) =
                     synth_fallback(theta, eps, q.clone(), sin_alpha, 7 + i as u64, false)
                 else {

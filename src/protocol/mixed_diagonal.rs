@@ -761,7 +761,6 @@ mod tests {
     #[serial]
     fn straddling_search_finds_mixed_pair_for_generic_angles() {
         for k in [1i64, 3, 5, 7] {
-            crate::clear_caches();
             let theta_f64 = k as f64 * PI / 32.0;
             let epsilon = 1e-6;
             let (region, unit_disk, transformed, wframe, mut config) =
@@ -799,7 +798,6 @@ mod tests {
     #[serial]
     fn straddling_search_finds_unmixed_for_exact_angles() {
         for theta_f64 in [PI / 2.0, PI] {
-            crate::clear_caches();
             let epsilon = 1e-6;
             let (region, unit_disk, transformed, wframe, mut config) = setup(theta_f64, epsilon, 7);
 
@@ -824,7 +822,6 @@ mod tests {
     #[test]
     #[serial]
     fn twirl_variants_preserve_top_left_entry_exactly() {
-        crate::clear_caches();
         let theta_f64 = 3.0 * PI / 32.0;
         let epsilon = 1e-6;
         let (region, unit_disk, transformed, wframe, mut config) = setup(theta_f64, epsilon, 99);
@@ -881,7 +878,6 @@ mod tests {
             (5.9, 1e-10, 21),
         ];
         for (theta_f64, epsilon, seed) in cases {
-            crate::clear_caches();
             let (region, unit_disk, transformed, wframe, mut config) =
                 setup(theta_f64, epsilon, seed);
             let phase_tolerance = config.epsilon.clone();
@@ -934,7 +930,6 @@ mod tests {
     #[test]
     #[serial]
     fn absolute_oracle_end_to_end_error_matches_closed_form() {
-        crate::clear_caches();
         let theta_f64 = 3.0 * PI / 32.0;
         let epsilon = 1e-5;
         let (region, unit_disk, transformed, wframe, mut config) = setup(theta_f64, epsilon, 55);
@@ -1010,7 +1005,6 @@ mod tests {
     #[serial]
     fn branch_weights_sum_to_one() {
         for (theta_f64, epsilon) in [(3.0 * PI / 32.0, 1e-5), (PI / 2.0, 1e-5), (PI / 4.0, 1e-5)] {
-            crate::clear_caches();
             let result = synth_mixed_diagonal(theta_f64, epsilon, 321, false);
             let mut total = ib_to_bf_prec(IBig::ZERO);
             for branch in &result.branches {
@@ -1032,7 +1026,6 @@ mod tests {
     #[serial]
     fn degenerate_angles_produce_unmixed_result() {
         for theta_f64 in [PI / 2.0, PI] {
-            crate::clear_caches();
             let result = synth_mixed_diagonal(theta_f64, 1e-6, 654, false);
             assert_eq!(
                 result.branches.len(),
@@ -1091,7 +1084,6 @@ mod tests {
         for (eps_idx, &eps) in epsilons.iter().enumerate() {
             let mut total_cost = 0.0;
             for (i, &theta) in angles.iter().enumerate() {
-                crate::clear_caches();
                 let seed = 10_000 + (eps_idx * 1000 + i) as u64;
                 let result = synth_mixed_diagonal(theta, eps, seed, false);
                 let mut cost = 0.0;

@@ -9,18 +9,35 @@ use dashu_int::{IBig, UBig};
 use log::warn;
 use once_cell::sync::Lazy;
 use rand::Rng;
-use std::sync::{LazyLock, Mutex};
 use std::time::Instant;
 use std::{
     collections::{HashMap, VecDeque},
     ops::Mul,
 };
 
-static PRIMALITY_CACHE: LazyLock<Mutex<HashMap<IBig, bool>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Memo caches for the number-theoretic search (`is_prime`, `find_factor`,
+/// `diophantine_dyadic`, and friends). Owned by the caller via [`DiophantineData`], so
+/// concurrent syntheses never share them and a synthesis's output does not depend on what
+/// ran before it in the same process. All keys are exact integers or exact ring elements --
+/// nothing here is precision-dependent, so there is no analog of the ambient-precision hazard
+/// this design otherwise fixes.
+#[derive(Debug, Default, Clone)]
+pub struct Caches {
+    primality: HashMap<IBig, bool>,
+    sqrt: HashMap<(IBig, IBig), Option<IBig>>,
+    factor: HashMap<IBig, Option<IBig>>,
+    /// Solutions `w` to the dyadic Diophantine equation `w†w = xi`, keyed by `xi`'s complete
+    /// representation `(xi.alpha.a, xi.alpha.b, xi.k)`.
+    diophantine: HashMap<(IBig, IBig, i64), Option<DOmega>>,
+}
 
-type SqrtCacheType = LazyLock<Mutex<HashMap<(IBig, IBig), Option<IBig>>>>;
-static SQRT_CACHE: SqrtCacheType = LazyLock::new(|| Mutex::new(HashMap::new()));
+impl Caches {
+    /// Drops every memoized entry, e.g. to reproduce a fixed starting state between runs
+    /// that intentionally reuse one `Caches` (most callers should just build a fresh one).
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
 
 // WARN: Distribution of random_ubig is different from the rng.random_range
 fn random_ubig<R>(bits: usize, rng: &mut R) -> UBig
@@ -103,17 +120,20 @@ fn modpow(mut base: IBig, exp: &IBig, modulus: &IBig) -> IBig {
     result
 }
 
-pub fn is_prime<R: Rng + ?Sized>(mut n: IBig, iterations: usize, rng: &mut R) -> bool {
+pub fn is_prime<R: Rng + ?Sized>(
+    mut n: IBig,
+    iterations: usize,
+    rng: &mut R,
+    caches: &mut Caches,
+) -> bool {
     if n < IBig::ZERO {
         n = -n;
     }
 
     let n_key = n.clone();
 
-    if let Ok(cache) = PRIMALITY_CACHE.lock() {
-        if let Some(&result) = cache.get(&n_key) {
-            return result;
-        }
+    if let Some(&result) = caches.primality.get(&n_key) {
+        return result;
     }
 
     static TWO: Lazy<IBig> = Lazy::new(|| IBig::from(2));
@@ -132,9 +152,7 @@ pub fn is_prime<R: Rng + ?Sized>(mut n: IBig, iterations: usize, rng: &mut R) ->
     if n.bit_len() <= 64 {
         if let Ok(n_u64) = TryInto::<u64>::try_into(&n) {
             let result = is_small_prime(n_u64);
-            if let Ok(mut cache) = PRIMALITY_CACHE.lock() {
-                cache.insert(n_key, result);
-            }
+            caches.primality.insert(n_key, result);
             return result;
         }
     }
@@ -162,24 +180,23 @@ pub fn is_prime<R: Rng + ?Sized>(mut n: IBig, iterations: usize, rng: &mut R) ->
                 continue 'outer;
             }
         }
-        if let Ok(mut cache) = PRIMALITY_CACHE.lock() {
-            cache.insert(n_key, false);
-        }
+        caches.primality.insert(n_key, false);
         return false;
     }
 
-    if let Ok(mut cache) = PRIMALITY_CACHE.lock() {
-        cache.insert(n_key, true);
-    }
+    caches.primality.insert(n_key, true);
     true
 }
 
-pub fn sqrt_negative_one<R: Rng + ?Sized>(p: &IBig, trials: usize, rng: &mut R) -> Option<IBig> {
+pub fn sqrt_negative_one<R: Rng + ?Sized>(
+    p: &IBig,
+    trials: usize,
+    rng: &mut R,
+    caches: &mut Caches,
+) -> Option<IBig> {
     let cache_key = (p.clone(), IBig::NEG_ONE);
-    if let Ok(cache) = SQRT_CACHE.lock() {
-        if let Some(result) = cache.get(&cache_key) {
-            return result.clone();
-        }
+    if let Some(result) = caches.sqrt.get(&cache_key) {
+        return result.clone();
     }
 
     let bits = p.bit_len();
@@ -191,32 +208,30 @@ pub fn sqrt_negative_one<R: Rng + ?Sized>(p: &IBig, trials: usize, rng: &mut R) 
         let h = modpow(b, &exp, p);
         let r = (&h * &h) % p;
         if r == p - IBig::ONE {
-            if let Ok(mut cache) = SQRT_CACHE.lock() {
-                cache.insert(cache_key, Some(h.clone()));
-            }
+            caches.sqrt.insert(cache_key, Some(h.clone()));
             return Some(h);
         } else if r != IBig::ONE {
-            if let Ok(mut cache) = SQRT_CACHE.lock() {
-                cache.insert(cache_key, None);
-            }
+            caches.sqrt.insert(cache_key, None);
             return None;
         }
     }
 
-    if let Ok(mut cache) = SQRT_CACHE.lock() {
-        cache.insert(cache_key, None);
-    }
+    caches.sqrt.insert(cache_key, None);
     None
 }
 
-fn root_mod<R: Rng + ?Sized>(x: IBig, p: &IBig, trials: usize, rng: &mut R) -> Option<IBig> {
+fn root_mod<R: Rng + ?Sized>(
+    x: IBig,
+    p: &IBig,
+    trials: usize,
+    rng: &mut R,
+    caches: &mut Caches,
+) -> Option<IBig> {
     let x: IBig = x.rem_euclid(p).into();
 
     let cache_key = (x.clone(), p.clone());
-    if let Ok(cache) = SQRT_CACHE.lock() {
-        if let Some(result) = cache.get(&cache_key) {
-            return result.clone();
-        }
+    if let Some(result) = caches.sqrt.get(&cache_key) {
+        return result.clone();
     }
 
     if p == &IBig::from(2) {
@@ -229,9 +244,7 @@ fn root_mod<R: Rng + ?Sized>(x: IBig, p: &IBig, trials: usize, rng: &mut R) -> O
         return None;
     }
     if modpow(x.clone(), &((p - IBig::ONE) / IBig::from(2)), p) != IBig::ONE {
-        if let Ok(mut cache) = SQRT_CACHE.lock() {
-            cache.insert(cache_key, None);
-        }
+        caches.sqrt.insert(cache_key, None);
         return None;
     }
 
@@ -242,25 +255,19 @@ fn root_mod<R: Rng + ?Sized>(x: IBig, p: &IBig, trials: usize, rng: &mut R) -> O
         let b = IBig::from(random_ubig(bits, rng));
         let r = modpow(b.clone(), &(p - IBig::ONE), p);
         if r != IBig::ONE {
-            if let Ok(mut cache) = SQRT_CACHE.lock() {
-                cache.insert(cache_key, None);
-            }
+            caches.sqrt.insert(cache_key, None);
             return None;
         }
         let base = (b.clone() * b.clone() + p - x.clone()) % p;
         if modpow(base.clone(), &((p - IBig::ONE) / IBig::from(2)), p) != IBig::ONE {
             let mut f = Fp2::new_with_modulus(b, IBig::ONE, base, p);
             let result = Some(f.pow((p + 1) / 2).a);
-            if let Ok(mut cache) = SQRT_CACHE.lock() {
-                cache.insert(cache_key, result.clone());
-            }
+            caches.sqrt.insert(cache_key, result.clone());
             return result;
         }
     }
 
-    if let Ok(mut cache) = SQRT_CACHE.lock() {
-        cache.insert(cache_key, None);
-    }
+    caches.sqrt.insert(cache_key, None);
     None
 }
 
@@ -349,23 +356,19 @@ fn decompose_relatively_prime(mut factors: Vec<(IBig, i32)>) -> (IBig, Vec<(IBig
     (u, facs)
 }
 
-static FACTOR_CACHE: LazyLock<Mutex<HashMap<IBig, Option<IBig>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
 fn find_factor<R: Rng + ?Sized>(
     n: &IBig,
     timeout_ms: u128,
     _m: usize,
     rng: &mut R,
+    caches: &mut Caches,
 ) -> Option<IBig> {
     if n.bit_len() > 1024 || n == &IBig::ZERO || n == &IBig::ONE {
         return None;
     }
 
-    if let Ok(cache) = FACTOR_CACHE.try_lock() {
-        if let Some(cached_result) = cache.get(n) {
-            return cached_result.clone();
-        }
+    if let Some(cached_result) = caches.factor.get(n) {
+        return cached_result.clone();
     }
 
     if n % IBig::from(2) == IBig::ZERO && n > &IBig::from(2) {
@@ -383,11 +386,9 @@ fn find_factor<R: Rng + ?Sized>(
         }
         if n % IBig::from(p) == IBig::ZERO && n > &IBig::from(p) {
             let result = Some(IBig::from(p));
-            if let Ok(mut cache) = FACTOR_CACHE.try_lock() {
-                cache.insert(n.clone(), result.clone());
-                if cache.len() > 5000 {
-                    cache.clear();
-                }
+            caches.factor.insert(n.clone(), result.clone());
+            if caches.factor.len() > 5000 {
+                caches.factor.clear();
             }
             return result;
         }
@@ -403,27 +404,21 @@ fn find_factor<R: Rng + ?Sized>(
                 }
                 if n_u64.is_multiple_of(i) {
                     let result = Some(IBig::from(i));
-                    if let Ok(mut cache) = FACTOR_CACHE.try_lock() {
-                        cache.insert(n.clone(), result.clone());
-                    }
+                    caches.factor.insert(n.clone(), result.clone());
                     return result;
                 }
             }
         }
-        if let Ok(mut cache) = FACTOR_CACHE.try_lock() {
-            cache.insert(n.clone(), None);
-        }
+        caches.factor.insert(n.clone(), None);
         return None;
     }
 
     let remaining_timeout = timeout_ms.saturating_sub(start.elapsed().as_millis());
     let result = pollard_rho(n, remaining_timeout, rng);
 
-    if let Ok(mut cache) = FACTOR_CACHE.try_lock() {
-        cache.insert(n.clone(), result.clone());
-        if cache.len() > 5000 {
-            cache.clear();
-        }
+    caches.factor.insert(n.clone(), result.clone());
+    if caches.factor.len() > 5000 {
+        caches.factor.clear();
     }
 
     result
@@ -464,7 +459,11 @@ fn pollard_rho<R: Rng + ?Sized>(n: &IBig, timeout_ms: u128, rng: &mut R) -> Opti
     None
 }
 
-fn adj_decompose_int_prime<R>(p: &IBig, rng: &mut R) -> Result<Option<ZOmega>, String>
+fn adj_decompose_int_prime<R>(
+    p: &IBig,
+    rng: &mut R,
+    caches: &mut Caches,
+) -> Result<Option<ZOmega>, String>
 where
     R: Rng + ?Sized,
 {
@@ -480,9 +479,9 @@ where
             IBig::ZERO,
         )));
     }
-    if is_prime(p.clone(), 4, rng) {
+    if is_prime(p.clone(), 4, rng, caches) {
         if &p & 0b11 == IBig::ONE {
-            if let Some(h) = sqrt_negative_one(&p, 100, rng) {
+            if let Some(h) = sqrt_negative_one(&p, 100, rng, caches) {
                 let t = ZOmega::gcd(
                     h + ZOmega::new(IBig::ZERO, IBig::ONE, IBig::ZERO, IBig::ZERO),
                     ZOmega::from_int(p.clone()),
@@ -494,7 +493,7 @@ where
             }
             Ok(None)
         } else if &p & 0b111 == IBig::from(3) {
-            if let Some(h) = root_mod(IBig::from(-2), &p, 100, rng) {
+            if let Some(h) = root_mod(IBig::from(-2), &p, 100, rng, caches) {
                 let t = ZOmega::gcd(
                     h + ZOmega::new(IBig::ONE, IBig::ZERO, IBig::ONE, IBig::ZERO),
                     ZOmega::from_int(p.clone()),
@@ -506,7 +505,7 @@ where
             }
             Ok(None)
         } else if &p & 0b111 == IBig::from(7) {
-            if root_mod(IBig::from(2), &p, 100, rng).is_some() {
+            if root_mod(IBig::from(2), &p, 100, rng, caches).is_some() {
                 Err("No solution in adj_decompose_int_prime".to_string())
             } else {
                 Ok(None)
@@ -515,7 +514,7 @@ where
             Ok(None)
         }
     } else if &p & 0b111 == IBig::from(7) {
-        if root_mod(IBig::from(2), &p, 100, rng).is_some() {
+        if root_mod(IBig::from(2), &p, 100, rng, caches).is_some() {
             Err("No solution in adj_decompose_int_prime".to_string())
         } else {
             Ok(None)
@@ -525,14 +524,19 @@ where
     }
 }
 
-fn adj_decompose_int_prime_power<R>(p: &IBig, k: i32, rng: &mut R) -> Result<Option<ZOmega>, String>
+fn adj_decompose_int_prime_power<R>(
+    p: &IBig,
+    k: i32,
+    rng: &mut R,
+    caches: &mut Caches,
+) -> Result<Option<ZOmega>, String>
 where
     R: Rng + ?Sized,
 {
     if k & 1 == 0 {
         Ok(Some(ZOmega::from_int(p.pow((k / 2) as usize))))
     } else {
-        match adj_decompose_int_prime(p, rng) {
+        match adj_decompose_int_prime(p, rng, caches) {
             Ok(Some(t)) => Ok(Some(t.pow(k.try_into().unwrap()))),
             Ok(None) => Ok(None),
             Err(e) => Err(e),
@@ -548,9 +552,15 @@ fn adj_decompose_int(
     n = n.abs();
     let mut facs = vec![(n, 1)];
     let mut t = ZOmega::from_int(IBig::ONE);
+    let DiophantineData {
+        rng,
+        caches,
+        diophantine_timeout,
+        factoring_timeout,
+    } = diophantine_data;
 
     while let Some((p, k)) = facs.pop() {
-        if start_time.elapsed().as_millis() >= diophantine_data.diophantine_timeout {
+        if start_time.elapsed().as_millis() >= *diophantine_timeout {
             return Ok(None);
         }
 
@@ -558,14 +568,9 @@ fn adj_decompose_int(
             return Ok(None);
         }
 
-        match adj_decompose_int_prime_power(&p, k, &mut diophantine_data.rng) {
+        match adj_decompose_int_prime_power(&p, k, rng, caches) {
             Ok(None) => {
-                if let Some(fac) = find_factor(
-                    &p,
-                    diophantine_data.factoring_timeout,
-                    128,
-                    &mut diophantine_data.rng,
-                ) {
+                if let Some(fac) = find_factor(&p, *factoring_timeout, 128, rng, caches) {
                     facs.push((p / fac.clone(), k));
                     facs.push((fac, k));
                     let (_, new_facs) = decompose_relatively_prime(facs);
@@ -655,6 +660,7 @@ pub fn decompose_relatively_zomega_prime(
 pub fn adj_decompose_zomega_prime<R: Rng + ?Sized>(
     eta: ZRootTwo,
     rng: &mut R,
+    caches: &mut Caches,
 ) -> Result<Option<ZOmega>, String> {
     let mut p = eta.norm();
     if p < IBig::ZERO {
@@ -671,10 +677,10 @@ pub fn adj_decompose_zomega_prime<R: Rng + ?Sized>(
         )));
     }
 
-    if is_prime(p.clone(), 4, rng) {
+    if is_prime(p.clone(), 4, rng, caches) {
         let check: i32 = (&p & IBig::from(0b111)).try_into().unwrap();
         match check {
-            1 => Ok(sqrt_negative_one(&p, 100, rng).and_then(|h| {
+            1 => Ok(sqrt_negative_one(&p, 100, rng, caches).and_then(|h| {
                 let t = ZOmega::gcd(
                     h + ZOmega::new(IBig::ZERO, IBig::ONE, IBig::ZERO, IBig::ZERO),
                     ZOmega::from_zroottwo(&eta),
@@ -689,23 +695,25 @@ pub fn adj_decompose_zomega_prime<R: Rng + ?Sized>(
                     None
                 }
             })),
-            3 => Ok(root_mod(IBig::from(-2), &p, 100, rng).and_then(|h| {
-                let t = ZOmega::gcd(
-                    h + ZOmega::new(IBig::ONE, IBig::ZERO, IBig::ONE, IBig::ZERO),
-                    ZOmega::from_zroottwo(&eta),
-                );
-                let a = t.clone().conj() * &t;
-                let a_zrt = ZRootTwo::from_zomega(a);
-                if a_zrt.clone() % eta.clone() == ZRootTwo::from_int(IBig::ZERO)
-                    && eta % a_zrt == ZRootTwo::from_int(IBig::ZERO)
-                {
-                    Some(t)
-                } else {
-                    None
-                }
-            })),
+            3 => Ok(
+                root_mod(IBig::from(-2), &p, 100, rng, caches).and_then(|h| {
+                    let t = ZOmega::gcd(
+                        h + ZOmega::new(IBig::ONE, IBig::ZERO, IBig::ONE, IBig::ZERO),
+                        ZOmega::from_zroottwo(&eta),
+                    );
+                    let a = t.clone().conj() * &t;
+                    let a_zrt = ZRootTwo::from_zomega(a);
+                    if a_zrt.clone() % eta.clone() == ZRootTwo::from_int(IBig::ZERO)
+                        && eta % a_zrt == ZRootTwo::from_int(IBig::ZERO)
+                    {
+                        Some(t)
+                    } else {
+                        None
+                    }
+                }),
+            ),
             7 => {
-                if root_mod(IBig::from(2), &p, 100, rng).is_some() {
+                if root_mod(IBig::from(2), &p, 100, rng, caches).is_some() {
                     Err("No solution in adj_decompose_zomega_prime".to_string())
                 } else {
                     Ok(None)
@@ -714,7 +722,7 @@ pub fn adj_decompose_zomega_prime<R: Rng + ?Sized>(
             _ => Ok(None),
         }
     } else if &p & 0b111 == IBig::from(7) {
-        if root_mod(IBig::from(2), &p, 100, rng).is_some() {
+        if root_mod(IBig::from(2), &p, 100, rng, caches).is_some() {
             Err("No solution in adj_decompose_zomega_prime".to_string())
         } else {
             Ok(None)
@@ -728,11 +736,12 @@ pub fn adj_decompose_zomega_prime_power<R: Rng + ?Sized>(
     eta: ZRootTwo,
     k: i32,
     rng: &mut R,
+    caches: &mut Caches,
 ) -> Result<Option<ZOmega>, String> {
     if k & 1 == 0 {
         Ok(Some(ZOmega::from_zroottwo(&eta.pow(&IBig::from(k / 2)))))
     } else {
-        match adj_decompose_zomega_prime(eta, rng) {
+        match adj_decompose_zomega_prime(eta, rng, caches) {
             Ok(Some(t)) => Ok(Some(t.pow(k.try_into().unwrap()))),
             Ok(None) => Ok(None),
             Err(e) => Err(e),
@@ -747,24 +756,24 @@ pub fn adj_decompose_selfcoprime(
 ) -> Result<Option<ZOmega>, String> {
     let mut facs: Vec<(ZRootTwo, i32)> = vec![(xi.clone(), 1)];
     let mut t = ZOmega::from_int(IBig::ONE);
+    let DiophantineData {
+        rng,
+        caches,
+        diophantine_timeout,
+        factoring_timeout,
+    } = diophantine_data;
     while let Some((eta, k)) = facs.pop() {
-        if start_time.elapsed().as_millis() >= diophantine_data.diophantine_timeout {
+        if start_time.elapsed().as_millis() >= *diophantine_timeout {
             return Ok(None);
         }
 
-        match adj_decompose_zomega_prime_power(eta.clone(), k, &mut diophantine_data.rng) {
+        match adj_decompose_zomega_prime_power(eta.clone(), k, rng, caches) {
             Ok(None) => {
                 let mut n = eta.norm();
                 if n < IBig::ZERO {
                     n = -n;
                 }
-                if let Some(fac_n) = find_factor(
-                    &n,
-                    diophantine_data.factoring_timeout,
-                    128,
-                    &mut diophantine_data.rng,
-                ) {
-                    //  &mut diophantine_data.rng) {
+                if let Some(fac_n) = find_factor(&n, *factoring_timeout, 128, rng, caches) {
                     let fac = ZRootTwo::gcd(xi.clone(), ZRootTwo::from_int(fac_n));
                     facs.push((&eta / &fac, k));
                     facs.push((fac, k));
@@ -839,41 +848,13 @@ fn diophantine(
     }
 }
 
-// Cache solutions w to the dyadic Diophantine equation w†w = ξ,
-// keyed by ξ's complete representation (xi.alpha.a, xi.alpha.b, xi.k).
-type DiophantineCacheType = LazyLock<Mutex<HashMap<(IBig, IBig, i64), Option<DOmega>>>>;
-static DIOPHANTINE_CACHE: DiophantineCacheType = LazyLock::new(|| Mutex::new(HashMap::new()));
-
-pub fn clear_caches() {
-    if let Ok(mut cache) = PRIMALITY_CACHE.try_lock() {
-        cache.clear();
-    //        println!("cleared primality cache");
-    } else {
-        //        println!("Can't clear primality cache");
-    }
-    if let Ok(mut cache) = SQRT_CACHE.try_lock() {
-        cache.clear();
-        //        println!("cleared sqrt cache");
-    }
-    if let Ok(mut cache) = FACTOR_CACHE.try_lock() {
-        cache.clear();
-        //        println!("cleared factor cache");
-    }
-    if let Ok(mut cache) = DIOPHANTINE_CACHE.try_lock() {
-        cache.clear();
-        //        println!("cleared diophantine cache");
-    }
-}
-
 pub(crate) fn diophantine_dyadic(
     xi: DRootTwo,
     diophantine_data: &mut DiophantineData,
 ) -> Option<DOmega> {
     let cache_key = (xi.alpha.a.clone(), xi.alpha.b.clone(), xi.k);
-    if let Ok(cache) = DIOPHANTINE_CACHE.try_lock() {
-        if let Some(cached_result) = cache.get(&cache_key) {
-            return cached_result.clone();
-        }
+    if let Some(cached_result) = diophantine_data.caches.diophantine.get(&cache_key) {
+        return cached_result.clone();
     }
 
     let xi_target = DOmega::from_droottwo(xi.alpha.clone(), xi.k);
@@ -900,11 +881,12 @@ pub(crate) fn diophantine_dyadic(
     };
     let result = result.filter(|w| (w.conj() * w) == xi_target);
 
-    if let Ok(mut cache) = DIOPHANTINE_CACHE.try_lock() {
-        cache.insert(cache_key, result.clone());
-        if cache.len() > 10000 {
-            cache.clear();
-        }
+    diophantine_data
+        .caches
+        .diophantine
+        .insert(cache_key, result.clone());
+    if diophantine_data.caches.diophantine.len() > 10000 {
+        diophantine_data.caches.diophantine.clear();
     }
 
     result

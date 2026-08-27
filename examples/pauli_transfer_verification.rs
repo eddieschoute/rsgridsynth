@@ -73,7 +73,6 @@ use dashu_float::round::mode::HalfEven;
 use dashu_float::FBig;
 use dashu_int::IBig;
 use num::Complex;
-use rsgridsynth::clear_caches;
 use rsgridsynth::common::{cos_fbig, fb_with_prec, ib_to_bf_prec, sin_fbig};
 use rsgridsynth::math::{sign, sqrt_fbig};
 use rsgridsynth::protocol::fallback::exact_q;
@@ -555,7 +554,6 @@ fn main() {
         for (i, &theta_f64) in thetas.iter().enumerate() {
             let seed = 2000 + i as u64;
 
-            clear_caches();
             let md = synth_mixed_diagonal(theta_f64, eps, seed, false);
             let theta = to_fbig(theta_f64);
             let eps_fb = to_fbig(eps);
@@ -568,7 +566,6 @@ fn main() {
                 dd <= eps_fb
             );
 
-            clear_caches();
             let sin_alpha = eps / 4.0;
             match synth_fallback(theta_f64, eps, q.clone(), sin_alpha, seed, false) {
                 Some(result) => {
@@ -588,7 +585,6 @@ fn main() {
                 None => println!("fallback,{theta_f64},{eps},{eps},ERROR,NotFound,false"),
             }
 
-            clear_caches();
             match synth_mixed_fallback(theta_f64, eps, q.clone(), seed, false) {
                 Some(MixedFallbackResult::Exact { gates }) => {
                     let theta = to_fbig(theta_f64);
@@ -792,7 +788,6 @@ mod debug_tests {
 
         for &theta_f64 in &[0.1_f64, 0.7, 1.3, 2.5] {
             for &eps in &[1e-3_f64, 1e-4, 1e-5, 1e-6] {
-                clear_caches();
                 let mut config = config_from_theta_epsilon(theta_f64, eps, 42, false, false);
                 let result = gridsynth_gates(&mut config);
                 let theta = to_fbig(theta_f64);
