@@ -352,7 +352,7 @@ fn half_angle_cos_sin(cos_phi: &Fb, sin_phi: &Fb) -> (Fb, Fb) {
     let one_minus_cos = fsub(&fone(), cos_phi);
     let cos_half = fdiv(&one_plus_cos, &two).sqrt();
     let sin_half_mag = fdiv(&one_minus_cos, &two).sqrt();
-    let sin_half = if PREC.sign(sin_phi.clone()) < 0 {
+    let sin_half = if rsgridsynth::math::sign(sin_phi) < 0 {
         fneg(&sin_half_mag)
     } else {
         sin_half_mag

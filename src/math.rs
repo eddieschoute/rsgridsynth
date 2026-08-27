@@ -11,14 +11,6 @@ impl Prec {
         self.ib(IBig::from(2)).sqrt()
     }
 
-    pub fn sign(self, x: FBig<HalfEven>) -> i8 {
-        match x.partial_cmp(&self.ib(IBig::ZERO)) {
-            Some(Ordering::Greater) => 1,
-            Some(Ordering::Less) => -1,
-            _ => 0,
-        }
-    }
-
     pub fn floorsqrt(self, x: FBig<HalfEven>) -> IBig {
         assert!(x >= self.ib(IBig::ZERO), "Negative input to floorsqrt");
         self.binary_search_sqrt(x)
@@ -89,6 +81,16 @@ impl Prec {
             }
         }
         (n, r)
+    }
+}
+
+/// Sign of `x`, precision-independent: comparing a value to zero doesn't depend on which
+/// precision it (or the zero it's compared against) happens to carry.
+pub fn sign(x: &FBig<HalfEven>) -> i8 {
+    match x.partial_cmp(&FBig::<HalfEven>::ZERO) {
+        Some(Ordering::Greater) => 1,
+        Some(Ordering::Less) => -1,
+        _ => 0,
     }
 }
 

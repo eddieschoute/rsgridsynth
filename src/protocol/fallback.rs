@@ -383,7 +383,7 @@ pub(crate) fn half_angle_cos_sin(
     let cos_half = (&one_plus_cos / &two).sqrt();
     let sin_half_mag = (&one_minus_cos / &two).sqrt();
 
-    let sin_half = if prec.sign(sin_phi.clone()) < 0 {
+    let sin_half = if crate::math::sign(sin_phi) < 0 {
         -sin_half_mag
     } else {
         sin_half_mag

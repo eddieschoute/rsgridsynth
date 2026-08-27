@@ -7,6 +7,7 @@ use crate::ring::ZOmega;
 use dashu_base::Sign;
 use dashu_float::round::mode::HalfEven;
 use dashu_float::FBig;
+use dashu_int::ops::SquareRoot;
 use dashu_int::IBig;
 use std::cmp::Ordering;
 use std::fmt;
@@ -104,23 +105,25 @@ impl ZRootTwo {
         }
     }
 
-    pub fn sqrt(&self, prec: Prec) -> Option<Self> {
-        let norm = prec.ib(self.norm());
-        if norm < prec.ib(IBig::ZERO) || self.a < IBig::ZERO {
+    /// Exact: this is an integer/rational computation throughout (`Z[√2]`'s standard
+    /// closed-form square root), so unlike most of this crate's arithmetic it needs no
+    /// working precision at all.
+    pub fn sqrt(&self) -> Option<Self> {
+        let norm = self.norm();
+        if norm < IBig::ZERO || self.a < IBig::ZERO {
             return None;
         }
-        let r = prec.floorsqrt(norm);
-        let a1 = prec.floorsqrt(prec.ib((&self.a + &r) / IBig::from(2)));
-        let b1 = prec.floorsqrt(prec.ib((&self.a - &r) / IBig::from(4)));
-        let a2 = prec.floorsqrt(prec.ib((&self.a - &r) / IBig::from(2)));
-        let b2 = prec.floorsqrt(prec.ib((&self.a + &r) / IBig::from(4)));
+        let r = IBig::from(norm.sqrt());
+        let a1 = IBig::from(((&self.a + &r) / IBig::from(2)).sqrt());
+        let b1 = IBig::from(((&self.a - &r) / IBig::from(4)).sqrt());
+        let a2 = IBig::from(((&self.a - &r) / IBig::from(2)).sqrt());
+        let b2 = IBig::from(((&self.a + &r) / IBig::from(4)).sqrt());
 
-        let (w1, w2) =
-            if prec.sign(prec.ib(self.a.clone())) * prec.sign(prec.ib(self.b.clone())) >= 0 {
-                (Self::new(a1, b1), Self::new(a2, b2))
-            } else {
-                (Self::new(a1, -b1), Self::new(a2, -b2))
-            };
+        let (w1, w2) = if self.a.signum() * self.b.signum() >= IBig::ZERO {
+            (Self::new(a1, b1), Self::new(a2, b2))
+        } else {
+            (Self::new(a1, -b1), Self::new(a2, -b2))
+        };
 
         if (*self) == (&w1 * &w1) {
             Some(w1)

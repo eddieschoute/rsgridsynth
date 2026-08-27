@@ -314,7 +314,7 @@ pub(crate) fn search_for_straddling_pair<A: Region + std::fmt::Debug>(
                 // two cases without needing bit-exact equality.
                 if xi.to_real(config.prec) == zero && im.clone().abs() <= *phase_tolerance {
                     if let Some(w_val) =
-                        diophantine_dyadic(config.prec, xi.clone(), &mut config.diophantine_data)
+                        diophantine_dyadic(xi.clone(), &mut config.diophantine_data)
                     {
                         return StraddleOutcome::Unmixed(process_solution_candidate(
                             z,
@@ -331,9 +331,7 @@ pub(crate) fn search_for_straddling_pair<A: Region + std::fmt::Debug>(
                         // Slot already filled: don't waste a factoring attempt on it.
                         continue;
                     }
-                    if let Some(w_val) =
-                        diophantine_dyadic(config.prec, xi, &mut config.diophantine_data)
-                    {
+                    if let Some(w_val) = diophantine_dyadic(xi, &mut config.diophantine_data) {
                         lo = Some(process_solution_candidate(z, w_val, PhaseMode::Exact));
                         if let Some(hi_val) = hi {
                             return StraddleOutcome::Mixed(lo.unwrap(), Box::new(hi_val));
@@ -343,9 +341,7 @@ pub(crate) fn search_for_straddling_pair<A: Region + std::fmt::Debug>(
                     if hi.is_some() {
                         continue;
                     }
-                    if let Some(w_val) =
-                        diophantine_dyadic(config.prec, xi, &mut config.diophantine_data)
-                    {
+                    if let Some(w_val) = diophantine_dyadic(xi, &mut config.diophantine_data) {
                         hi = Some(process_solution_candidate(z, w_val, PhaseMode::Exact));
                         if let Some(lo_val) = lo {
                             return StraddleOutcome::Mixed(lo_val, Box::new(hi.unwrap()));

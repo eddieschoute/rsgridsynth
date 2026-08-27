@@ -819,7 +819,6 @@ fn adj_decompose(
     }
 }
 fn diophantine(
-    prec: crate::common::Prec,
     xi: &ZRootTwo,
     start_time: Instant,
     diophantine_data: &mut DiophantineData,
@@ -836,11 +835,9 @@ fn diophantine(
         Ok(Some(t)) => {
             let xi_associate = ZRootTwo::from_zomega(t.conj() * &t);
             let u = xi / &xi_associate;
-            // `u.sqrt()` is exact (the result, if any, is an exact `ZRootTwo`), but its
-            // internal floorsqrt algorithm needs a working precision to compute with -- any
-            // precision at least as large as `u`'s bit-length suffices; this crate's working
-            // precision for the surrounding synthesis is always generous enough.
-            match u.sqrt(prec) {
+            // `u.sqrt()` is exact integer/rational arithmetic throughout (the result, if any,
+            // is an exact `ZRootTwo`), so it needs no working precision at all.
+            match u.sqrt() {
                 Some(v) => Ok(Some(&ZOmega::from_zroottwo(&v) * &t)),
                 None => {
                     warn!("Cannot find square root of u");
@@ -854,7 +851,6 @@ fn diophantine(
 }
 
 pub(crate) fn diophantine_dyadic(
-    prec: crate::common::Prec,
     xi: DRootTwo,
     diophantine_data: &mut DiophantineData,
 ) -> Option<DOmega> {
@@ -874,7 +870,7 @@ pub(crate) fn diophantine_dyadic(
     };
 
     let start_time = Instant::now();
-    let t = diophantine(prec, &alpha, start_time, diophantine_data);
+    let t = diophantine(&alpha, start_time, diophantine_data);
     let result = match t {
         Err(_) => None,
         Ok(None) => None,

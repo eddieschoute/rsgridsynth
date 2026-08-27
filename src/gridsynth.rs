@@ -388,7 +388,7 @@ where
         if let Some(s) = stats.as_deref_mut() {
             s.diophantine_attempts += 1;
         }
-        if let Some(w_val) = diophantine_dyadic(config.prec, xi, &mut config.diophantine_data) {
+        if let Some(w_val) = diophantine_dyadic(xi, &mut config.diophantine_data) {
             if let Some(start) = start_diophantine {
                 *time_of_diophantine_dyadic += start.elapsed();
                 if config.measure_time {

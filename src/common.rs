@@ -70,8 +70,4 @@ impl Prec {
     pub fn pi(self) -> FBig<HalfEven> {
         FBig::pi(self.0)
     }
-
-    pub fn tau(self) -> FBig<HalfEven> {
-        2 * self.pi()
-    }
 }
