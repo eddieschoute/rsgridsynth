@@ -2,7 +2,7 @@
 // Licensed under the MIT License. See LICENSE file in the project root for full license information.
 
 use crate::common::Prec;
-use crate::math::{floorsqrt, rounddiv, sign, sqrt2};
+use crate::math::rounddiv;
 use crate::ring::ZOmega;
 use dashu_base::Sign;
 use dashu_float::round::mode::HalfEven;
@@ -72,7 +72,7 @@ impl ZRootTwo {
     }
 
     pub fn to_real(&self, prec: Prec) -> FBig<HalfEven> {
-        &self.a + sqrt2(prec) * &self.b
+        prec.ib(self.a.clone()) + prec.sqrt2() * &self.b
     }
 
     pub fn conj_sq2(&self) -> Self {
@@ -109,14 +109,14 @@ impl ZRootTwo {
         if norm < prec.ib(IBig::ZERO) || self.a < IBig::ZERO {
             return None;
         }
-        let r = floorsqrt(prec, norm);
-        let a1 = floorsqrt(prec, prec.ib((&self.a + &r) / IBig::from(2)));
-        let b1 = floorsqrt(prec, prec.ib((&self.a - &r) / IBig::from(4)));
-        let a2 = floorsqrt(prec, prec.ib((&self.a - &r) / IBig::from(2)));
-        let b2 = floorsqrt(prec, prec.ib((&self.a + &r) / IBig::from(4)));
+        let r = prec.floorsqrt(norm);
+        let a1 = prec.floorsqrt(prec.ib((&self.a + &r) / IBig::from(2)));
+        let b1 = prec.floorsqrt(prec.ib((&self.a - &r) / IBig::from(4)));
+        let a2 = prec.floorsqrt(prec.ib((&self.a - &r) / IBig::from(2)));
+        let b2 = prec.floorsqrt(prec.ib((&self.a + &r) / IBig::from(4)));
 
         let (w1, w2) =
-            if sign(prec, prec.ib(self.a.clone())) * sign(prec, prec.ib(self.b.clone())) >= 0 {
+            if prec.sign(prec.ib(self.a.clone())) * prec.sign(prec.ib(self.b.clone())) >= 0 {
                 (Self::new(a1, b1), Self::new(a2, b2))
             } else {
                 (Self::new(a1, -b1), Self::new(a2, -b2))

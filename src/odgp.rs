@@ -1,7 +1,6 @@
 // Copyright (c) 2024-2025 Shun Yamamoto and Nobuyuki Yoshioka, and IBM
 // Licensed under the MIT License. See LICENSE file in the project root for full license information.
 
-use crate::math::{floorlog, pow_sqrt2, sqrt2};
 use crate::region::Interval;
 use crate::ring::z_root_two::LAMBDA;
 use crate::ring::{DRootTwo, ZRootTwo};
@@ -24,7 +23,7 @@ pub fn solve_odgp(i: Interval, j: Interval) -> impl Iterator<Item = ZRootTwo> {
     let a = div_result1.floor().try_into().unwrap();
 
     let diff = &i.l - &j.l;
-    let div_result2: FBig<HalfEven> = (sqrt2(prec) * diff) / 4;
+    let div_result2: FBig<HalfEven> = (prec.sqrt2() * diff) / 4;
     let b = div_result2.floor().try_into().unwrap();
     let alpha = ZRootTwo::new(a, b);
     let sub_i = i.sub_ref(&alpha.to_real(prec));
@@ -52,7 +51,7 @@ fn solve_odgp_internal(i: Interval, j: Interval) -> Box<dyn Iterator<Item = ZRoo
     let n = if j.width() <= bfzero {
         IBig::ZERO
     } else {
-        floorlog(prec, j.width(), LAMBDA.to_real(prec)).0
+        prec.floorlog(j.width(), LAMBDA.to_real(prec)).0
     };
 
     let lambda_n = LAMBDA.pow(&n);
@@ -86,10 +85,10 @@ fn solve_odgp_internal(i: Interval, j: Interval) -> Box<dyn Iterator<Item = ZRoo
     })
     .flat_map(move |a| {
         let a_real = prec.ib(a.clone()); // 明示的に clone して消費
-        let tmp1: FBig<HalfEven> = sqrt2(prec) * (&a_real - &j.r) / 2;
+        let tmp1: FBig<HalfEven> = prec.sqrt2() * (&a_real - &j.r) / 2;
         let b_min: IBig = tmp1.ceil().try_into().unwrap();
 
-        let tmp2: FBig<HalfEven> = sqrt2(prec) * (&a_real - &j.l) / 2;
+        let tmp2: FBig<HalfEven> = prec.sqrt2() * (&a_real - &j.l) / 2;
         let b_max: IBig = tmp2.floor().try_into().unwrap();
 
         iter::successors(Some(b_min.clone()), move |b| {
@@ -117,8 +116,8 @@ pub fn solve_odgp_with_parity(
 ) -> impl Iterator<Item = ZRootTwo> {
     let prec = i.prec;
     let p = beta.parity();
-    let scale_factor1 = sqrt2(prec) / 2;
-    let scale_factor2 = -sqrt2(prec) / 2;
+    let scale_factor1 = prec.sqrt2() / 2;
+    let scale_factor2 = -prec.sqrt2() / 2;
     let scaled_i = (i - p.clone()).scale(&scale_factor1);
     let scaled_j = (j - p.clone()).scale(&scale_factor2);
     let sol = solve_odgp(scaled_i, scaled_j);
@@ -133,7 +132,7 @@ pub fn first_solve_scaled_odgp(i: &Interval, j: &Interval, k: i64) -> Option<DRo
 
 pub fn solve_scaled_odgp(i: &Interval, j: &Interval, k: i64) -> impl Iterator<Item = DRootTwo> {
     let prec = i.prec;
-    let scale = pow_sqrt2(prec, k);
+    let scale = prec.pow_sqrt2(k);
     let neg_scale = -scale.clone();
     let scaled_j = if k & 1 == 0 {
         j.scale(&scale)

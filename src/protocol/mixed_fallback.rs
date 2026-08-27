@@ -34,11 +34,10 @@
 use crate::accuracy::{
     achieved_diagonal_diamond_error, achieved_phase_diamond_error, AchievedDiamondError, WFrame,
 };
-use crate::common::{cos_fbig, sin_fbig, Prec};
+use crate::common::Prec;
 use crate::config::{config_from_theta_epsilon, GridSynthConfig};
 use crate::gate::{Gate, GateSeq};
 use crate::gridsynth::{setup_regions_and_transform, UnitDisk};
-use crate::math::sqrt_fbig;
 use crate::protocol::fallback::{
     half_angle_cos_sin, phase_cos_sin, residual_diamond_error_mixed, SectorRegion,
 };
@@ -303,7 +302,7 @@ pub fn synth_mixed_fallback(
     // fallback's eps/2 (Prop 3.16 vs. Prop 3.9).
     let two = prec.fb(FBig::try_from(2.0).unwrap());
     let half_eps = &epsilon_spec / &two;
-    let sin_alpha = sqrt_fbig(prec, &half_eps);
+    let sin_alpha = prec.sqrt(&half_eps);
 
     let scale = ZRootTwo::new(IBig::from(1), IBig::from(0));
     let sector_region = SectorRegion::new(prec, &config.theta, q, sin_alpha, scale.clone());
@@ -343,8 +342,8 @@ pub fn synth_mixed_fallback(
             );
 
             let neg_theta_half = -prec.fb(&config.theta / &two);
-            let theta_z_x = prec.fb(cos_fbig(prec, &neg_theta_half));
-            let theta_z_y = prec.fb(sin_fbig(prec, &neg_theta_half));
+            let theta_z_x = prec.fb(prec.cos(&neg_theta_half));
+            let theta_z_y = prec.fb(prec.sin(&neg_theta_half));
 
             let lo_side = build_side(prec, lo, &theta_z_x, &theta_z_y, &epsilon_spec, &mut config);
             let hi_side = build_side(prec, hi, &theta_z_x, &theta_z_y, &epsilon_spec, &mut config);

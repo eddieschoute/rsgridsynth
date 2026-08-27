@@ -10,9 +10,8 @@
 //! ## Arbitrary precision throughout, not `f64`
 //!
 //! Every quantity in this file -- matrix entries, Pauli transfer matrices, angular
-//! differences -- is computed as `FBig<HalfEven>` at the crate's own working precision
-//! (`rsgridsynth::common::get_prec_bits()`, set by whichever `synth_*` call ran most
-//! recently), never downcast to `f64` until the final printed digits. An earlier version of
+//! differences -- is computed as `FBig<HalfEven>` at this file's own fixed working precision
+//! (`PREC` below), never downcast to `f64` until the final printed digits. An earlier version of
 //! this file converted synthesized matrices to `f64` immediately and computed
 //! `2*sqrt(1-Re(w)^2)`: at epsilon ~1e-8 the true angular error can be ~1e-9, at which point
 //! `Re(w)` rounds to exactly `1.0` in `f64` (whose resolution near 1.0 is ~2.2e-16), and
@@ -73,8 +72,7 @@ use dashu_float::round::mode::HalfEven;
 use dashu_float::FBig;
 use dashu_int::IBig;
 use num::Complex;
-use rsgridsynth::common::{cos_fbig, sin_fbig, Prec};
-use rsgridsynth::math::{sign, sqrt_fbig};
+use rsgridsynth::common::Prec;
 use rsgridsynth::protocol::fallback::exact_q;
 use rsgridsynth::protocol::{
     synth_fallback, synth_mixed_diagonal, synth_mixed_fallback, FallbackResult,
@@ -159,7 +157,7 @@ fn cx_real(x: Fb) -> Cx {
 }
 
 fn cx_abs(z: &Cx) -> Fb {
-    sqrt_fbig(PREC, &z.norm_sqr())
+    PREC.sqrt(&z.norm_sqr())
 }
 
 type M2 = [[Cx; 2]; 2];
@@ -262,7 +260,7 @@ fn target_matrix_from_half(cos_half: &Fb, sin_half: &Fb) -> M2 {
 fn target_matrix(theta: &Fb) -> M2 {
     let two = PREC.ib(IBig::from(2));
     let half = fdiv(theta, &two);
-    target_matrix_from_half(&cos_fbig(PREC, &half), &sin_fbig(PREC, &half))
+    target_matrix_from_half(&PREC.cos(&half), &PREC.sin(&half))
 }
 
 /// `delta_q_P` from the diagonal of a *difference* of two channels' PTMs (each channel's own
@@ -352,9 +350,9 @@ fn half_angle_cos_sin(cos_phi: &Fb, sin_phi: &Fb) -> (Fb, Fb) {
     let two = PREC.ib(IBig::from(2));
     let one_plus_cos = fadd(&fone(), cos_phi);
     let one_minus_cos = fsub(&fone(), cos_phi);
-    let cos_half = sqrt_fbig(PREC, &fdiv(&one_plus_cos, &two));
-    let sin_half_mag = sqrt_fbig(PREC, &fdiv(&one_minus_cos, &two));
-    let sin_half = if sign(PREC, sin_phi.clone()) < 0 {
+    let cos_half = PREC.sqrt(&fdiv(&one_plus_cos, &two));
+    let sin_half_mag = PREC.sqrt(&fdiv(&one_minus_cos, &two));
+    let sin_half = if PREC.sign(sin_phi.clone()) < 0 {
         fneg(&sin_half_mag)
     } else {
         sin_half_mag
@@ -366,12 +364,12 @@ fn half_angle_cos_sin(cos_phi: &Fb, sin_phi: &Fb) -> (Fb, Fb) {
 /// `(cos(Arg v), sin(Arg v)) = (Re(v), Im(v)) / |v|` -- no `atan2` needed, `Arg(v)` itself is
 /// never materialized as a number.
 fn residual_cos_sin(theta: &Fb, v: &Cx) -> (Fb, Fb) {
-    let norm = sqrt_fbig(PREC, &v.norm_sqr());
+    let norm = PREC.sqrt(&v.norm_sqr());
     let inv_norm = fdiv(&fone(), &norm);
     let cos_argv = fmul(&v.re, &inv_norm);
     let sin_argv = fmul(&v.im, &inv_norm);
-    let cos_theta = cos_fbig(PREC, theta);
-    let sin_theta = sin_fbig(PREC, theta);
+    let cos_theta = PREC.cos(theta);
+    let sin_theta = PREC.sin(theta);
     let cos_res = fadd(&fmul(&cos_theta, &cos_argv), &fmul(&sin_theta, &sin_argv));
     let sin_res = fsub(&fmul(&sin_theta, &cos_argv), &fmul(&cos_theta, &sin_argv));
     (cos_res, sin_res)
@@ -390,12 +388,12 @@ fn residual_cos_sin(theta: &Fb, v: &Cx) -> (Fb, Fb) {
 /// had, caught by comparing against `plain_diagonal_epsilon_convention_calibration`'s
 /// epsilon-scaling expectation.
 fn single_rotation_diamond_distance(z: &Cx, theta: &Fb) -> Fb {
-    let norm = sqrt_fbig(PREC, &z.norm_sqr());
+    let norm = PREC.sqrt(&z.norm_sqr());
     let phase = z.scale(fdiv(&fone(), &norm));
     let two = PREC.ib(IBig::from(2));
     let half = fdiv(theta, &two);
-    let c = cos_fbig(PREC, &half);
-    let s = sin_fbig(PREC, &half);
+    let c = PREC.cos(&half);
+    let s = PREC.sin(&half);
     // Im(w) = z_x*Im(u) - z_y*Re(u), z_x = cos(half), z_y = -sin(half) (WFrame's convention).
     let im_w = fadd(&fmul(&phase.im, &c), &fmul(&phase.re, &s));
     fmul(&PREC.ib(IBig::from(2)), &im_w.abs())
@@ -432,7 +430,7 @@ fn phase_sq_from_z(z: &Cx) -> Cx {
 /// check) is too loose to see the cancellation at all, and wrongly looks like a failure.
 fn rotation_mixture_diamond_distance(weighted_phase_sq: &[(Fb, Cx)], theta: &Fb) -> Fb {
     let mut c = cx_zero();
-    let target_phase = Cx::new(cos_fbig(PREC, theta), fneg(&sin_fbig(PREC, theta))); // e^{-i*theta}
+    let target_phase = Cx::new(PREC.cos(theta), fneg(&PREC.sin(theta))); // e^{-i*theta}
     for (w, phase_sq) in weighted_phase_sq {
         let diff = phase_sq - &target_phase;
         c = &c + &diff.scale(w.clone());

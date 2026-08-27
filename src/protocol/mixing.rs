@@ -18,6 +18,7 @@ use dashu_float::round::mode::HalfEven;
 use dashu_float::FBig;
 use dashu_int::ops::Abs;
 use dashu_int::IBig;
+use num_traits::Zero;
 
 // `WFrame` and `diagonal_diamond_distance` live in `crate::accuracy` now (shared by both this
 // protocol module and the plain single-candidate synthesis path in `crate::gridsynth`), but
@@ -93,13 +94,13 @@ pub fn mixture_weight(
 
     // Degenerate case: one branch is already an exact solution (zero rotation error), so
     // mixing is unnecessary and the closed form below would divide 0/0.
-    if im_lo.repr().is_zero() {
+    if im_lo.is_zero() {
         return Some(MixtureWeight {
             p: prec.ib(IBig::ONE),
             projective_diamond_error: zero,
         });
     }
-    if im_hi.repr().is_zero() {
+    if im_hi.is_zero() {
         return Some(MixtureWeight {
             p: zero.clone(),
             projective_diamond_error: zero,
@@ -109,7 +110,7 @@ pub fn mixture_weight(
     let hi_cross = re_hi * im_hi;
     let lo_cross = re_lo * im_lo;
     let denom = &hi_cross - &lo_cross;
-    if denom.repr().is_zero() {
+    if denom.is_zero() {
         // Neither branch is exact, yet the closed form is 0/0: a genuinely degenerate,
         // ill-posed pair. Refuse to guess rather than divide by zero.
         return None;
@@ -167,9 +168,7 @@ pub fn diamond_to_spec_epsilon(prec: Prec, eps_diamond: &FBig<HalfEven>) -> FBig
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::{cos_fbig, sin_fbig};
     use crate::gridsynth::EpsilonRegion;
-    use crate::math::sqrt_fbig;
     use crate::ring::{DOmega, ZOmega, ZRootTwo};
     use crate::tdgp::Region;
 
@@ -248,8 +247,7 @@ mod tests {
         let eps_sq = &epsilon * &epsilon;
         let half_eps_sq = &eps_sq / &four;
         let one_minus_half_eps_sq = &one - &half_eps_sq;
-        let d = PREC
-            .fb(sqrt_fbig(PREC, &one_minus_half_eps_sq) * sqrt_fbig(PREC, &scale.to_real(PREC)));
+        let d = PREC.fb(PREC.sqrt(&one_minus_half_eps_sq) * PREC.sqrt(&scale.to_real(PREC)));
 
         for u in sample_domegas() {
             let re_w = frame.re_w(&u);
@@ -358,8 +356,8 @@ mod tests {
     fn diagonal_diamond_distance_matches_closed_form() {
         // Re(w) = cos(delta) for delta = 0.05: distance should be 2*sin(0.05).
         let delta = to_fbig(0.05);
-        let re_w = cos_fbig(PREC, &delta);
-        let expected = to_fbig(2.0) * (sin_fbig(PREC, &delta));
+        let re_w = PREC.cos(&delta);
+        let expected = to_fbig(2.0) * (PREC.sin(&delta));
         let dist = diagonal_diamond_distance(PREC, &re_w);
         assert!(
             approx_eq(&dist, &expected, 200),

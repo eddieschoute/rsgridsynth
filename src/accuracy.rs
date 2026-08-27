@@ -14,9 +14,8 @@
 //! not an independent derivation from a different method. `examples/pauli_transfer_verification.rs`
 //! implements a genuinely independent (Pauli-transfer-matrix-based) check, for that purpose.
 
-use crate::common::{cos_fbig, sin_fbig, Prec};
+use crate::common::Prec;
 use crate::gate::Gate;
-use crate::math::sqrt_fbig;
 use crate::ring::DOmega;
 use crate::unitary::DOmegaUnitary;
 use dashu_float::round::mode::HalfEven;
@@ -50,8 +49,8 @@ impl WFrame {
         let two = prec.fb(FBig::try_from(2.0).unwrap());
         let theta_half = prec.fb(theta / &two);
         let neg_theta_half = -prec.fb(theta_half);
-        let z_x: FBig<HalfEven> = prec.fb(cos_fbig(prec, &neg_theta_half));
-        let z_y: FBig<HalfEven> = prec.fb(sin_fbig(prec, &neg_theta_half));
+        let z_x: FBig<HalfEven> = prec.fb(prec.cos(&neg_theta_half));
+        let z_y: FBig<HalfEven> = prec.fb(prec.sin(&neg_theta_half));
         Self { z_x, z_y, prec }
     }
 
@@ -111,7 +110,7 @@ pub fn diagonal_diamond_distance(prec: Prec, re_w: &FBig<HalfEven>) -> FBig<Half
     let zero = prec.ib(IBig::ZERO);
     let clamped = one_minus_re_w_sq.max(zero);
     let two = prec.fb(FBig::try_from(2.0).unwrap());
-    &two * sqrt_fbig(prec, &clamped)
+    &two * prec.sqrt(&clamped)
 }
 
 /// Decodes `gates`, optionally rotating the decoded top-left entry by the extra `e^{i pi/8}`
@@ -129,7 +128,7 @@ pub(crate) fn gate_seq_diamond_error(
 
     let re_w = if extra_eighth_turn {
         let p = prec.fb(FBig::<HalfEven>::try_from(std::f64::consts::PI / 8.).unwrap());
-        let phase = Complex::new(cos_fbig(prec, &p), sin_fbig(prec, &p));
+        let phase = Complex::new(prec.cos(&p), prec.sin(&p));
         let z = Complex::new(u.z().real(prec).clone(), u.z().imag(prec).clone());
         let shifted = &z * &phase;
         wframe.re_w_fbig(&shifted.re, &shifted.im)
@@ -178,7 +177,7 @@ pub fn achieved_phase_diamond_error(
     let u = DOmegaUnitary::from_gates(gates);
     let z = u.z();
     let norm_sq = (z.real(prec) * z.real(prec)) + (z.imag(prec) * z.imag(prec));
-    let norm = sqrt_fbig(prec, &norm_sq);
+    let norm = prec.sqrt(&norm_sq);
     let re_n = z.real(prec) / &norm;
     let im_n = z.imag(prec) / &norm;
 

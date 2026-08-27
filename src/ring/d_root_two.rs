@@ -7,7 +7,7 @@ use dashu_float::FBig;
 use dashu_int::IBig;
 
 use crate::common::Prec;
-use crate::math::{ntz, pow_sqrt2};
+use crate::math::ntz;
 use crate::ring::z_root_two::ZRootTwo;
 use crate::ring::DOmega;
 use std::cmp::Ordering;
@@ -65,7 +65,7 @@ impl DRootTwo {
     }
 
     pub fn scale(&self, prec: Prec) -> FBig<HalfEven> {
-        pow_sqrt2(prec, self.k)
+        prec.pow_sqrt2(self.k)
     }
 
     pub fn squared_scale(&self) -> IBig {

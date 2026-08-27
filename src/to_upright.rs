@@ -5,7 +5,6 @@ use log::debug;
 use std::fmt::Debug;
 
 use crate::grid_op::{EllipsePair, GridOp};
-use crate::math::{floorsqrt, log};
 use crate::region::{Ellipse, Rectangle};
 use crate::ring::z_root_two::LAMBDA;
 use crate::ring::ZOmega;
@@ -81,7 +80,7 @@ pub fn step_lemma(
         );
         reduction(ellipse_pair, op_g_l, op_g_r, &op_x)
     } else if ellipse_pair.bias() > check0 || ellipse_pair.bias() < check1 {
-        let n: IBig = ((log(prec, ellipse_pair.bias()) / log(prec, LAMBDA.to_real(prec)))
+        let n: IBig = ((prec.log(ellipse_pair.bias()) / prec.log(LAMBDA.to_real(prec)))
             / prec.ib(IBig::from(8)))
         .round()
         .try_into()
@@ -98,7 +97,7 @@ pub fn step_lemma(
     } else if ellipse_pair.skew() <= prec.ib(IBig::from(15)) {
         (ellipse_pair, op_g_l.clone(), op_g_r.clone(), true)
     } else if ellipse_pair.bias() > check2 || ellipse_pair.bias() < check3 {
-        let n: i32 = ((log(prec, ellipse_pair.bias()) / log(prec, LAMBDA.to_real(prec)))
+        let n: i32 = ((prec.log(ellipse_pair.bias()) / prec.log(LAMBDA.to_real(prec)))
             / prec.ib(IBig::from(4)))
         .round()
         .try_into()
@@ -169,8 +168,9 @@ pub fn step_lemma(
         );
         reduction(ellipse_pair, op_g_l, op_g_r, &op_kc)
     } else if a.b() >= &prec.ib(IBig::ZERO) {
-        let n: IBig =
-            floorsqrt(prec, (a.bias().min(b.bias())) / prec.ib(IBig::from(4))).max(IBig::ONE);
+        let n: IBig = prec
+            .floorsqrt((a.bias().min(b.bias())) / prec.ib(IBig::from(4)))
+            .max(IBig::ONE);
         if verbose {
             debug!("A (n={})", n);
         }
@@ -180,8 +180,9 @@ pub fn step_lemma(
         );
         reduction(ellipse_pair, op_g_l, op_g_r, &op_a)
     } else {
-        let n: IBig =
-            floorsqrt(prec, (a.bias().min(b.bias())) / prec.ib(IBig::from(2))).max(IBig::ONE);
+        let n: IBig = prec
+            .floorsqrt((a.bias().min(b.bias())) / prec.ib(IBig::from(2)))
+            .max(IBig::ONE);
         if verbose {
             debug!("B (n={})", n);
         }

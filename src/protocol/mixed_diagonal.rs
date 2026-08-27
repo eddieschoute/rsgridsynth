@@ -12,13 +12,13 @@
 //! ("diagonal") protocol for the same diamond-norm accuracy.
 
 use crate::accuracy::{diagonal_diamond_distance, AchievedDiamondError, WFrame};
-use crate::common::{cos_fbig, sin_fbig, Prec};
+use crate::common::Prec;
 use crate::config::{config_from_theta_epsilon, GridSynthConfig};
 use crate::diophantine::diophantine_dyadic;
 use crate::gate::GateSeq;
 use crate::gridsynth::{process_solution_candidate, setup_regions_and_transform, PhaseMode};
 use crate::gridsynth::{UnitDisk, UprightTransform};
-use crate::math::{solve_quadratic, sqrt_fbig};
+use crate::math::solve_quadratic;
 use crate::normal_form::{Clifford, NormalForm};
 use crate::protocol::mixing::{diamond_to_spec_epsilon, mixture_weight};
 use crate::region::Ellipse;
@@ -89,8 +89,8 @@ impl MixedDiagonalRegion {
         let two = prec.fb(FBig::try_from(2.0).unwrap());
         let theta_half = prec.fb(theta / &two);
         let neg_theta_half = -prec.fb(theta_half);
-        let z_x: FBig<HalfEven> = prec.fb(cos_fbig(prec, &neg_theta_half));
-        let z_y: FBig<HalfEven> = prec.fb(sin_fbig(prec, &neg_theta_half));
+        let z_x: FBig<HalfEven> = prec.fb(prec.cos(&neg_theta_half));
+        let z_y: FBig<HalfEven> = prec.fb(prec.sin(&neg_theta_half));
         Self::from_target_direction_impl(prec, z_x, z_y, epsilon, scale)
     }
 
@@ -125,18 +125,18 @@ impl MixedDiagonalRegion {
         // near-degenerate candidate, as in `mixed_fallback::build_side`) is already past the
         // point where any point of the disk fails to qualify; the sane mathematical limit of
         // the formula below is `one_minus_half_eps = 0`, not a negative radicand. Clamp
-        // rather than let that panic in `sqrt_fbig`, matching the analogous clamp in
+        // rather than let that panic in `Prec::sqrt`, matching the analogous clamp in
         // `gridsynth::EpsilonRegion::from_target_direction_impl`.
         let one_minus_half_eps = (&one - &half_eps).max(zero.clone());
         let scale_to_real = scale.to_real(prec);
 
         // Exact offset, radial semi-axis, and tangential semi-axis -- see struct docs.
-        let sqrt_s = sqrt_fbig(prec, &scale_to_real);
-        let sqrt_one_minus_half_eps = sqrt_fbig(prec, &one_minus_half_eps);
+        let sqrt_s = prec.sqrt(&scale_to_real);
+        let sqrt_one_minus_half_eps = prec.sqrt(&one_minus_half_eps);
         let d = &sqrt_s * &sqrt_one_minus_half_eps;
         let h = &sqrt_s - &d;
         let s_half_eps = &scale_to_real * &half_eps;
-        let c = sqrt_fbig(prec, &s_half_eps);
+        let c = prec.sqrt(&s_half_eps);
 
         let h_sq = &h * &h;
         let c_sq = &c * &c;
@@ -304,8 +304,8 @@ pub(crate) fn search_for_straddling_pair<A: Region + std::fmt::Debug>(
                 // below, using floating `im_w` (the only place that measures the *angle*, as
                 // opposed to just the magnitude `xi`) to confirm the phase genuinely matches
                 // before short-circuiting on it. `im_w` mixes two independently rounded
-                // floating approximations of the same irrational value (`cos_fbig`/`sin_fbig`'s
-                // Taylor series for `z_x`/`z_y` vs. `sqrt2()`'s Newton iteration inside
+                // floating approximations of the same irrational value (`Prec::cos`/`Prec::sin`
+                // for `z_x`/`z_y` vs. `Prec::sqrt2`'s Newton iteration inside
                 // `u.real()`/`u.imag()`), so it is not bit-exact even for a genuine exact
                 // match -- but that rounding noise is many orders of magnitude below
                 // `phase_tolerance` (working precision scales with `-log(epsilon)`), while a
@@ -709,8 +709,8 @@ mod tests {
         let two = to_fbig(PREC, 2.0);
         let half_eps = &epsilon / &two;
         let scale_to_real = scale.to_real(PREC);
-        let sqrt_s = sqrt_fbig(PREC, &scale_to_real);
-        let c = sqrt_fbig(PREC, &(&scale_to_real * &half_eps));
+        let sqrt_s = PREC.sqrt(&scale_to_real);
+        let c = PREC.sqrt(&(&scale_to_real * &half_eps));
 
         let d = region.d.clone();
         let z_x = region.z_x.clone();
@@ -1042,7 +1042,7 @@ mod tests {
             ));
             // `achieved_diamond_error` is computed via `WFrame::re_w`/`diagonal_diamond_distance`,
             // which mixes two independently-rounded floating trig approximations
-            // (`cos_fbig`/`sin_fbig`) that do not cancel to bit-exact zero even when the true
+            // (`Prec::cos`/`Prec::sin`) that do not cancel to bit-exact zero even when the true
             // rotation error is exactly zero (same caveat this module already documents for
             // `im_w`) -- so this must be an approximate, not exact, equality check.
             // `diagonal_diamond_distance`'s `sqrt` roughly halves the number of reliable bits

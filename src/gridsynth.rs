@@ -1,12 +1,11 @@
 // Copyright (c) 2024-2025 Shun Yamamoto and Nobuyuki Yoshioka, and IBM
 // Licensed under the MIT License. See LICENSE file in the project root for full license information.
 
-use crate::common::{cos_fbig, sin_fbig, Prec};
+use crate::common::Prec;
 use crate::config::{GridSynthConfig, GridSynthResult};
 use crate::diophantine::diophantine_dyadic;
 use crate::grid_op::GridOp;
 use crate::math::solve_quadratic;
-use crate::math::sqrt_fbig;
 use crate::region::{Ellipse, Rectangle};
 use crate::ring::{DOmega, DRootTwo, ZOmega, ZRootTwo};
 use crate::synthesis_of_clifford_t::decompose_domega_unitary;
@@ -95,8 +94,8 @@ impl EpsilonRegion {
         let two = prec.fb(FBig::try_from(2.0).unwrap());
         let theta_half = prec.fb(&theta / &two);
         let neg_theta_half = -prec.fb(theta_half);
-        let z_x: FBig<HalfEven> = prec.fb(cos_fbig(prec, &neg_theta_half));
-        let z_y: FBig<HalfEven> = prec.fb(sin_fbig(prec, &neg_theta_half));
+        let z_x: FBig<HalfEven> = prec.fb(prec.cos(&neg_theta_half));
+        let z_y: FBig<HalfEven> = prec.fb(prec.sin(&neg_theta_half));
         Self::from_target_direction_impl(prec, z_x, z_y, epsilon, scale, theta)
     }
 
@@ -144,7 +143,7 @@ impl EpsilonRegion {
         // artifact (or a legitimately oversized derived epsilon) panic in `sqrt_fbig`.
         let one_minus_half_eps_sq = (one - half_eps_sq).max(prec.ib(IBig::ZERO));
         let scale_to_real = scale.to_real(prec);
-        let d = sqrt_fbig(prec, &one_minus_half_eps_sq) * sqrt_fbig(prec, &scale_to_real);
+        let d = prec.sqrt(&one_minus_half_eps_sq) * prec.sqrt(&scale_to_real);
 
         let neg_z_y: FBig<HalfEven> = -(z_y.clone());
         let zero: FBig<HalfEven> = prec.ib(IBig::ZERO);

@@ -7,21 +7,21 @@
 //! synthesis, and cross-checked against a genuinely different derivation
 //! (`independent_operator_error` below): it rebuilds the exact unitary represented by the
 //! returned gate string (via `DOmegaUnitary::from_gates`) and the ideal target rotation (via
-//! `cos_fbig`/`sin_fbig` at the same working precision) and computes the *operator*-norm
+//! `Prec::cos`/`Prec::sin` at the same working precision) and computes the *operator*-norm
 //! distance between them from the full matrix eigenvalue formula -- a different code path from
 //! `achieved_diamond_error`'s `WFrame`-based shortcut, related by the well-known
 //! `diamond = 2 * operator_norm` identity for this special (SU(2)-with-phase) matrix form. That
 //! way a bug in either derivation would show up as a disagreement, not just as both being wrong
 //! in the same way.
 
-use dashu_base::{Approximation, SquareRoot};
+use dashu_base::Approximation;
 use dashu_float::round::mode::HalfEven;
 use dashu_float::FBig;
 use num::Complex;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rsgridsynth::accuracy::AchievedDiamondError;
-use rsgridsynth::common::{cos_fbig, sin_fbig, Prec};
+use rsgridsynth::common::Prec;
 use rsgridsynth::config::config_from_theta_epsilon;
 use rsgridsynth::gate::Gate;
 use rsgridsynth::gridsynth::gridsynth_gates;
@@ -56,14 +56,14 @@ fn independent_operator_error(
 ) -> f64 {
     let two = prec.fb(FBig::try_from(2.0).unwrap());
     let neg_theta_half = -prec.fb(theta / &two);
-    let z_x = prec.fb(cos_fbig(prec, &neg_theta_half));
-    let z_y = prec.fb(sin_fbig(prec, &neg_theta_half));
+    let z_x = prec.fb(prec.cos(&neg_theta_half));
+    let z_y = prec.fb(prec.sin(&neg_theta_half));
 
     let synthesized = DOmegaUnitary::from_gates(gates).to_complex_matrix(prec);
     let mut u = synthesized[(0, 0)].clone();
     if shifted {
         let p = to_fbig(prec, std::f64::consts::PI / 8.);
-        let phase = Complex::new(cos_fbig(prec, &p), sin_fbig(prec, &p));
+        let phase = Complex::new(prec.cos(&p), prec.sin(&p));
         u = &u * &phase;
     }
 

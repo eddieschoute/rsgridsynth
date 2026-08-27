@@ -1,7 +1,7 @@
 // Copyright (c) 2024-2025 Shun Yamamoto and Nobuyuki Yoshioka, and IBM
 // Licensed under the MIT License. See LICENSE file in the project root for full license information.
 
-use crate::common::{pi, Prec};
+use crate::common::Prec;
 use dashu_float::round::mode::{self, HalfEven};
 use dashu_float::{Context, FBig};
 use dashu_int::IBig;
@@ -407,8 +407,16 @@ impl Ellipse {
     pub fn bbox(&self) -> Rectangle {
         let ctx: Context<mode::HalfEven> = self.prec.ctx();
         let sqrt_det = self.sqrt_det();
-        let w = ctx.sqrt(self.d().repr()).value() / &sqrt_det;
-        let h = ctx.sqrt(self.a().repr()).value() / &sqrt_det;
+        let w = ctx
+            .sqrt(self.d().repr())
+            .expect("sqrt of a finite, non-negative FBig cannot fail")
+            .value()
+            / &sqrt_det;
+        let h = ctx
+            .sqrt(self.a().repr())
+            .expect("sqrt of a finite, non-negative FBig cannot fail")
+            .value()
+            / &sqrt_det;
         let px_minus_w = self.px() - &w;
         let px_plus_w = self.px() + &w;
         let py_minus_h = self.py() - &h;
@@ -422,17 +430,22 @@ impl Ellipse {
     pub fn sqrt_det(&self) -> FBig<HalfEven> {
         let ctx: Context<mode::HalfEven> = self.prec.ctx();
         let det = self.d() * self.a() - self.b().powi(IBig::from(2));
-        ctx.sqrt(det.repr()).value()
+        ctx.sqrt(det.repr())
+            .expect("sqrt of a finite, non-negative FBig cannot fail")
+            .value()
     }
 
     pub fn area(&self) -> FBig<HalfEven> {
-        pi(self.prec) / self.sqrt_det()
+        self.prec.pi() / self.sqrt_det()
     }
 
     pub fn normalize(&self) -> Self {
         let ctx: Context<mode::HalfEven> = self.prec.ctx();
         let factor = self.sqrt_det();
-        let factor_sqrt = ctx.sqrt(factor.repr()).value();
+        let factor_sqrt = ctx
+            .sqrt(factor.repr())
+            .expect("sqrt of a finite, non-negative FBig cannot fail")
+            .value();
         Ellipse::new(
             self.d.clone() / factor,
             self.p.clone() * factor_sqrt,

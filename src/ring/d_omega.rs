@@ -11,7 +11,7 @@ use std::fmt::{Debug, Display, Formatter, Result};
 use std::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 
 use crate::common::Prec;
-use crate::math::{ntz, pow_sqrt2};
+use crate::math::ntz;
 use crate::ring::{DRootTwo, ZOmega, ZRootTwo};
 
 #[derive(Clone)]
@@ -67,7 +67,7 @@ impl DOmega {
     /// that reuses one long-lived `DOmega` across two different precisions would still see
     /// the first one "stick" here.
     pub fn scale(&self, prec: Prec) -> &FBig<HalfEven> {
-        self.scale_cache.get_or_init(|| pow_sqrt2(prec, self.k))
+        self.scale_cache.get_or_init(|| prec.pow_sqrt2(self.k))
     }
 
     pub fn real(&self, prec: Prec) -> &FBig<HalfEven> {
