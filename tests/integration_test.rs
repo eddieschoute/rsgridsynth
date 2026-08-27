@@ -3,7 +3,6 @@ use dashu_float::FBig;
 use rsgridsynth::accuracy::AchievedDiamondError;
 use rsgridsynth::config::config_from_theta_epsilon;
 use rsgridsynth::gridsynth::gridsynth_gates;
-use serial_test::serial;
 
 fn fbig_to_f64(x: &FBig<HalfEven>) -> f64 {
     match x.to_f64() {
@@ -13,7 +12,6 @@ fn fbig_to_f64(x: &FBig<HalfEven>) -> f64 {
 }
 
 #[test]
-#[serial]
 fn simple_test() {
     let pi = std::f64::consts::PI;
     let theta = pi / 8.0; // ≈ 0.39269908169872414
@@ -43,7 +41,6 @@ fn simple_test() {
 }
 
 #[test]
-#[serial]
 fn pi_over_two_test() {
     let pi = std::f64::consts::PI;
     let theta = pi / 2.0;
@@ -65,7 +62,6 @@ fn pi_over_two_test() {
 }
 
 #[test]
-#[serial]
 fn pi_over_4_exact_test() {
     let pi = std::f64::consts::PI;
     let theta = pi / 4.0;
@@ -82,7 +78,6 @@ fn pi_over_4_exact_test() {
 }
 
 #[test]
-#[serial]
 fn pi_over_4_with_phase_test() {
     let pi = std::f64::consts::PI;
     let theta = pi / 4.0;
@@ -100,7 +95,6 @@ fn pi_over_4_with_phase_test() {
 /// Pins the user-visible contract that a synthesized result's printed (`Display`) form is
 /// always re-readable via `GateSeq::from_str` -- the CLI's whole output contract rests on this.
 #[test]
-#[serial]
 fn public_api_gates_round_trip_through_display_and_parse() {
     let theta = std::f64::consts::PI / 8.0;
     let epsilon = 1e-10;
@@ -112,7 +106,6 @@ fn public_api_gates_round_trip_through_display_and_parse() {
 }
 
 #[test]
-#[serial]
 fn test_correct_decomposition_exact() {
     let epsilon = 1e-10;
 
@@ -144,7 +137,6 @@ fn test_correct_decomposition_exact() {
 }
 
 #[test]
-#[serial]
 fn test_correct_decomposition_up_to_phase() {
     let epsilon = 1e-10;
 
@@ -175,7 +167,6 @@ fn test_correct_decomposition_up_to_phase() {
 }
 
 #[test]
-#[serial]
 fn test_low_precision_bug() {
     let pi = std::f64::consts::PI;
     let theta = pi / 2.0;
@@ -186,7 +177,6 @@ fn test_low_precision_bug() {
 }
 
 #[test]
-#[serial]
 fn test_shared_cache_across_denomexp_no_panic() {
     let epsilon = 1e-3;
     let verbose = false;
@@ -231,7 +221,6 @@ fn test_shared_cache_across_denomexp_no_panic() {
 }
 
 #[test]
-#[serial]
 fn test_timeouts_preserved_after_synthesis() {
     let mut gridsynth_config =
         config_from_theta_epsilon(std::f64::consts::PI / 8.0, 1e-10, 1234, false, true);

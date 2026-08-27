@@ -674,14 +674,12 @@ impl crate::accuracy::AchievedDiamondError for GridSynthResult {
 mod tests {
     use super::*;
     use crate::config::config_from_theta_epsilon;
-    use serial_test::serial;
 
     /// Exercises the `Option<&mut CandidateStats>` path threaded through
     /// `search_for_solution`/`process_solutions` (not yet reachable from any public API).
     /// Confirms the counters are populated sensibly for a real search, without ever
     /// materializing the underlying lazy candidate iterator.
     #[test]
-    #[serial]
     fn candidate_stats_are_populated_when_provided() {
         let theta = std::f64::consts::PI / 8.0;
         let epsilon = 1e-10;
