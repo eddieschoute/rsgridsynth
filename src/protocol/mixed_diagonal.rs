@@ -89,8 +89,8 @@ impl MixedDiagonalRegion {
         let two = prec.fb(FBig::try_from(2.0).unwrap());
         let theta_half = prec.fb(theta / &two);
         let neg_theta_half = -prec.fb(theta_half);
-        let z_x: FBig<HalfEven> = prec.fb(prec.cos(&neg_theta_half));
-        let z_y: FBig<HalfEven> = prec.fb(prec.sin(&neg_theta_half));
+        let z_x: FBig<HalfEven> = prec.fb(neg_theta_half.cos());
+        let z_y: FBig<HalfEven> = prec.fb(neg_theta_half.sin());
         Self::from_target_direction_impl(prec, z_x, z_y, epsilon, scale)
     }
 
@@ -125,18 +125,18 @@ impl MixedDiagonalRegion {
         // near-degenerate candidate, as in `mixed_fallback::build_side`) is already past the
         // point where any point of the disk fails to qualify; the sane mathematical limit of
         // the formula below is `one_minus_half_eps = 0`, not a negative radicand. Clamp
-        // rather than let that panic in `Prec::sqrt`, matching the analogous clamp in
+        // rather than let that panic in `FBig::sqrt`, matching the analogous clamp in
         // `gridsynth::EpsilonRegion::from_target_direction_impl`.
         let one_minus_half_eps = (&one - &half_eps).max(zero.clone());
         let scale_to_real = scale.to_real(prec);
 
         // Exact offset, radial semi-axis, and tangential semi-axis -- see struct docs.
-        let sqrt_s = prec.sqrt(&scale_to_real);
-        let sqrt_one_minus_half_eps = prec.sqrt(&one_minus_half_eps);
+        let sqrt_s = scale_to_real.sqrt();
+        let sqrt_one_minus_half_eps = one_minus_half_eps.sqrt();
         let d = &sqrt_s * &sqrt_one_minus_half_eps;
         let h = &sqrt_s - &d;
         let s_half_eps = &scale_to_real * &half_eps;
-        let c = prec.sqrt(&s_half_eps);
+        let c = s_half_eps.sqrt();
 
         let h_sq = &h * &h;
         let c_sq = &c * &c;
@@ -709,8 +709,8 @@ mod tests {
         let two = to_fbig(PREC, 2.0);
         let half_eps = &epsilon / &two;
         let scale_to_real = scale.to_real(PREC);
-        let sqrt_s = PREC.sqrt(&scale_to_real);
-        let c = PREC.sqrt(&(&scale_to_real * &half_eps));
+        let sqrt_s = scale_to_real.sqrt();
+        let c = (&scale_to_real * &half_eps).sqrt();
 
         let d = region.d.clone();
         let z_x = region.z_x.clone();

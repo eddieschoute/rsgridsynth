@@ -2,8 +2,8 @@
 // Licensed under the MIT License. See LICENSE file in the project root for full license information.
 
 use crate::common::Prec;
-use dashu_float::round::mode::{self, HalfEven};
-use dashu_float::{Context, FBig};
+use dashu_float::round::mode::HalfEven;
+use dashu_float::FBig;
 use dashu_int::IBig;
 use nalgebra::{Matrix2, Vector2};
 use std::fmt;
@@ -405,18 +405,9 @@ impl Ellipse {
     }
 
     pub fn bbox(&self) -> Rectangle {
-        let ctx: Context<mode::HalfEven> = self.prec.ctx();
         let sqrt_det = self.sqrt_det();
-        let w = ctx
-            .sqrt(self.d().repr())
-            .expect("sqrt of a finite, non-negative FBig cannot fail")
-            .value()
-            / &sqrt_det;
-        let h = ctx
-            .sqrt(self.a().repr())
-            .expect("sqrt of a finite, non-negative FBig cannot fail")
-            .value()
-            / &sqrt_det;
+        let w = self.d().sqrt() / &sqrt_det;
+        let h = self.a().sqrt() / &sqrt_det;
         let px_minus_w = self.px() - &w;
         let px_plus_w = self.px() + &w;
         let py_minus_h = self.py() - &h;
@@ -428,11 +419,8 @@ impl Ellipse {
     }
 
     pub fn sqrt_det(&self) -> FBig<HalfEven> {
-        let ctx: Context<mode::HalfEven> = self.prec.ctx();
         let det = self.d() * self.a() - self.b().powi(IBig::from(2));
-        ctx.sqrt(det.repr())
-            .expect("sqrt of a finite, non-negative FBig cannot fail")
-            .value()
+        det.sqrt()
     }
 
     pub fn area(&self) -> FBig<HalfEven> {
@@ -440,12 +428,8 @@ impl Ellipse {
     }
 
     pub fn normalize(&self) -> Self {
-        let ctx: Context<mode::HalfEven> = self.prec.ctx();
         let factor = self.sqrt_det();
-        let factor_sqrt = ctx
-            .sqrt(factor.repr())
-            .expect("sqrt of a finite, non-negative FBig cannot fail")
-            .value();
+        let factor_sqrt = factor.sqrt();
         Ellipse::new(
             self.d.clone() / factor,
             self.p.clone() * factor_sqrt,

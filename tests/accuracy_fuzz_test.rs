@@ -56,14 +56,14 @@ fn independent_operator_error(
 ) -> f64 {
     let two = prec.fb(FBig::try_from(2.0).unwrap());
     let neg_theta_half = -prec.fb(theta / &two);
-    let z_x = prec.fb(prec.cos(&neg_theta_half));
-    let z_y = prec.fb(prec.sin(&neg_theta_half));
+    let z_x = prec.fb(neg_theta_half.cos());
+    let z_y = prec.fb(neg_theta_half.sin());
 
     let synthesized = DOmegaUnitary::from_gates(gates).to_complex_matrix(prec);
     let mut u = synthesized[(0, 0)].clone();
     if shifted {
         let p = to_fbig(prec, std::f64::consts::PI / 8.);
-        let phase = Complex::new(prec.cos(&p), prec.sin(&p));
+        let phase = Complex::new(p.cos(), p.sin());
         u = &u * &phase;
     }
 

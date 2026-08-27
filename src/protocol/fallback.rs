@@ -63,7 +63,7 @@ pub(crate) fn phase_cos_sin(
     if v_norm_sq.is_zero() {
         return (prec.ib(IBig::ONE), prec.ib(IBig::ZERO), prec.ib(IBig::ONE));
     }
-    let v_norm = prec.sqrt(&v_norm_sq);
+    let v_norm = v_norm_sq.sqrt();
     let cos_phi = &re_v / &v_norm;
     let sin_phi = &im_v / &v_norm;
     (cos_phi, sin_phi, v_norm_sq)
@@ -154,18 +154,18 @@ impl SectorRegion {
         let two = prec.fb(FBig::try_from(2.0).unwrap());
         let theta_half = prec.fb(theta / &two);
         let neg_theta_half = -prec.fb(theta_half);
-        let z_x: FBig<HalfEven> = prec.fb(prec.cos(&neg_theta_half));
-        let z_y: FBig<HalfEven> = prec.fb(prec.sin(&neg_theta_half));
+        let z_x: FBig<HalfEven> = prec.fb(neg_theta_half.cos());
+        let z_y: FBig<HalfEven> = prec.fb(neg_theta_half.sin());
 
         let q_scaled = q * DRootTwo::from_zroottwo(scale.clone());
 
         let one = prec.ib(IBig::ONE);
         let sin_sq = &sin_alpha * &sin_alpha;
-        let cos_alpha = prec.sqrt(&(&one - &sin_sq));
+        let cos_alpha = (&one - &sin_sq).sqrt();
 
-        let sqrt_s = prec.sqrt(&scale.to_real(prec));
+        let sqrt_s = scale.to_real(prec).sqrt();
         let qs_real = q_scaled.to_real(prec);
-        let sqrt_qs = prec.sqrt(&qs_real);
+        let sqrt_qs = qs_real.sqrt();
 
         // Box radial half-width / center: the box spans the radial interval
         // [sqrt(q*scale)*cos(alpha), sqrt(scale)] (the CHORD's x-value as the inner edge --
@@ -328,7 +328,7 @@ impl Region for SectorRegion {
 
         let one = prec.ib(IBig::ONE);
         let sin_sq = &self.sin_alpha * &self.sin_alpha;
-        let cos_alpha = prec.sqrt(&(&one - &sin_sq));
+        let cos_alpha = (&one - &sin_sq).sqrt();
         let tan_alpha = &self.sin_alpha / &cos_alpha;
 
         // (a) Im(w) <= Re(w)*tan(alpha)  <=>  t*gv <= rhs_a, gv = Im(w_v) - tan*Re(w_v).
@@ -345,7 +345,7 @@ impl Region for SectorRegion {
         // which is what makes the sector's hull convex (excluding an inner disc is what
         // makes an annulus non-convex).
         let qs_real = self.q_scaled.to_real(prec);
-        let sqrt_qs = prec.sqrt(&qs_real);
+        let sqrt_qs = qs_real.sqrt();
         let d_inner = &sqrt_qs * &cos_alpha;
         let rhs_c = &d_inner - &re_w_u0;
         clip_ge(prec, t0, t1, &re_w_v, &rhs_c)
@@ -380,8 +380,8 @@ pub(crate) fn half_angle_cos_sin(
     let zero = prec.ib(IBig::ZERO);
     let one_plus_cos = (&one + cos_phi).max(zero.clone());
     let one_minus_cos = (&one - cos_phi).max(zero);
-    let cos_half = prec.sqrt(&(&one_plus_cos / &two));
-    let sin_half_mag = prec.sqrt(&(&one_minus_cos / &two));
+    let cos_half = (&one_plus_cos / &two).sqrt();
+    let sin_half_mag = (&one_minus_cos / &two).sqrt();
 
     let sin_half = if prec.sign(sin_phi.clone()) < 0 {
         -sin_half_mag
@@ -448,8 +448,8 @@ pub(crate) fn residual_wframe(
 
     let two = to_fbig(prec, 2.0);
     let neg_theta_half = -prec.fb(theta / &two);
-    let z_x = prec.fb(prec.cos(&neg_theta_half));
-    let z_y = prec.fb(prec.sin(&neg_theta_half));
+    let z_x = prec.fb(neg_theta_half.cos());
+    let z_y = prec.fb(neg_theta_half.sin());
 
     // cos(-theta_B/2) = cos(A+B) = Z_X*cos(phi/2) - Z_Y*sin(phi/2)
     // sin(-theta_B/2) = sin(A+B) = Z_Y*cos(phi/2) + Z_X*sin(phi/2)
@@ -585,8 +585,8 @@ pub fn synth_fallback(
 
     let two = to_fbig(prec, 2.0);
     let neg_theta_half = -prec.fb(&config.theta / &two);
-    let z_x = prec.fb(prec.cos(&neg_theta_half));
-    let z_y = prec.fb(prec.sin(&neg_theta_half));
+    let z_x = prec.fb(neg_theta_half.cos());
+    let z_y = prec.fb(neg_theta_half.sin());
 
     // cos(-theta_B/2) = cos(A+B) = Z_X*cos(phi/2) - Z_Y*sin(phi/2)
     // sin(-theta_B/2) = sin(A+B) = Z_Y*cos(phi/2) + Z_X*sin(phi/2)

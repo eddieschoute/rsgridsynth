@@ -157,7 +157,7 @@ fn cx_real(x: Fb) -> Cx {
 }
 
 fn cx_abs(z: &Cx) -> Fb {
-    PREC.sqrt(&z.norm_sqr())
+    z.norm_sqr().sqrt()
 }
 
 type M2 = [[Cx; 2]; 2];
@@ -260,7 +260,7 @@ fn target_matrix_from_half(cos_half: &Fb, sin_half: &Fb) -> M2 {
 fn target_matrix(theta: &Fb) -> M2 {
     let two = PREC.ib(IBig::from(2));
     let half = fdiv(theta, &two);
-    target_matrix_from_half(&PREC.cos(&half), &PREC.sin(&half))
+    target_matrix_from_half(&half.cos(), &half.sin())
 }
 
 /// `delta_q_P` from the diagonal of a *difference* of two channels' PTMs (each channel's own
@@ -350,8 +350,8 @@ fn half_angle_cos_sin(cos_phi: &Fb, sin_phi: &Fb) -> (Fb, Fb) {
     let two = PREC.ib(IBig::from(2));
     let one_plus_cos = fadd(&fone(), cos_phi);
     let one_minus_cos = fsub(&fone(), cos_phi);
-    let cos_half = PREC.sqrt(&fdiv(&one_plus_cos, &two));
-    let sin_half_mag = PREC.sqrt(&fdiv(&one_minus_cos, &two));
+    let cos_half = fdiv(&one_plus_cos, &two).sqrt();
+    let sin_half_mag = fdiv(&one_minus_cos, &two).sqrt();
     let sin_half = if PREC.sign(sin_phi.clone()) < 0 {
         fneg(&sin_half_mag)
     } else {
@@ -364,12 +364,12 @@ fn half_angle_cos_sin(cos_phi: &Fb, sin_phi: &Fb) -> (Fb, Fb) {
 /// `(cos(Arg v), sin(Arg v)) = (Re(v), Im(v)) / |v|` -- no `atan2` needed, `Arg(v)` itself is
 /// never materialized as a number.
 fn residual_cos_sin(theta: &Fb, v: &Cx) -> (Fb, Fb) {
-    let norm = PREC.sqrt(&v.norm_sqr());
+    let norm = v.norm_sqr().sqrt();
     let inv_norm = fdiv(&fone(), &norm);
     let cos_argv = fmul(&v.re, &inv_norm);
     let sin_argv = fmul(&v.im, &inv_norm);
-    let cos_theta = PREC.cos(theta);
-    let sin_theta = PREC.sin(theta);
+    let cos_theta = theta.cos();
+    let sin_theta = theta.sin();
     let cos_res = fadd(&fmul(&cos_theta, &cos_argv), &fmul(&sin_theta, &sin_argv));
     let sin_res = fsub(&fmul(&sin_theta, &cos_argv), &fmul(&cos_theta, &sin_argv));
     (cos_res, sin_res)
@@ -388,12 +388,12 @@ fn residual_cos_sin(theta: &Fb, v: &Cx) -> (Fb, Fb) {
 /// had, caught by comparing against `plain_diagonal_epsilon_convention_calibration`'s
 /// epsilon-scaling expectation.
 fn single_rotation_diamond_distance(z: &Cx, theta: &Fb) -> Fb {
-    let norm = PREC.sqrt(&z.norm_sqr());
+    let norm = z.norm_sqr().sqrt();
     let phase = z.scale(fdiv(&fone(), &norm));
     let two = PREC.ib(IBig::from(2));
     let half = fdiv(theta, &two);
-    let c = PREC.cos(&half);
-    let s = PREC.sin(&half);
+    let c = half.cos();
+    let s = half.sin();
     // Im(w) = z_x*Im(u) - z_y*Re(u), z_x = cos(half), z_y = -sin(half) (WFrame's convention).
     let im_w = fadd(&fmul(&phase.im, &c), &fmul(&phase.re, &s));
     fmul(&PREC.ib(IBig::from(2)), &im_w.abs())
@@ -430,7 +430,7 @@ fn phase_sq_from_z(z: &Cx) -> Cx {
 /// check) is too loose to see the cancellation at all, and wrongly looks like a failure.
 fn rotation_mixture_diamond_distance(weighted_phase_sq: &[(Fb, Cx)], theta: &Fb) -> Fb {
     let mut c = cx_zero();
-    let target_phase = Cx::new(PREC.cos(theta), fneg(&PREC.sin(theta))); // e^{-i*theta}
+    let target_phase = Cx::new(theta.cos(), fneg(&theta.sin())); // e^{-i*theta}
     for (w, phase_sq) in weighted_phase_sq {
         let diff = phase_sq - &target_phase;
         c = &c + &diff.scale(w.clone());

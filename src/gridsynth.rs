@@ -94,8 +94,8 @@ impl EpsilonRegion {
         let two = prec.fb(FBig::try_from(2.0).unwrap());
         let theta_half = prec.fb(&theta / &two);
         let neg_theta_half = -prec.fb(theta_half);
-        let z_x: FBig<HalfEven> = prec.fb(prec.cos(&neg_theta_half));
-        let z_y: FBig<HalfEven> = prec.fb(prec.sin(&neg_theta_half));
+        let z_x: FBig<HalfEven> = prec.fb(neg_theta_half.cos());
+        let z_y: FBig<HalfEven> = prec.fb(neg_theta_half.sin());
         Self::from_target_direction_impl(prec, z_x, z_y, epsilon, scale, theta)
     }
 
@@ -143,7 +143,7 @@ impl EpsilonRegion {
         // artifact (or a legitimately oversized derived epsilon) panic in `sqrt_fbig`.
         let one_minus_half_eps_sq = (one - half_eps_sq).max(prec.ib(IBig::ZERO));
         let scale_to_real = scale.to_real(prec);
-        let d = prec.sqrt(&one_minus_half_eps_sq) * prec.sqrt(&scale_to_real);
+        let d = one_minus_half_eps_sq.sqrt() * scale_to_real.sqrt();
 
         let neg_z_y: FBig<HalfEven> = -(z_y.clone());
         let zero: FBig<HalfEven> = prec.ib(IBig::ZERO);

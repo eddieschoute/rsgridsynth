@@ -2,36 +2,13 @@
 // Licensed under the MIT License. See LICENSE file in the project root for full license information.
 
 use crate::common::Prec;
-use dashu_float::round::mode;
-use dashu_float::Context;
 use dashu_float::{round::mode::HalfEven, FBig};
 use dashu_int::IBig;
 use std::cmp::Ordering;
 
 impl Prec {
     pub fn sqrt2(self) -> FBig<HalfEven> {
-        let ctx: Context<mode::HalfEven> = self.ctx();
-        let x = self.ib(IBig::from(2));
-        let a: FBig<HalfEven> = ctx.sqrt(x.repr()).expect("sqrt(2) cannot fail").value();
-        a
-    }
-
-    // This may be wasteful because of the allocation
-    pub fn sqrt(self, x: &FBig<HalfEven>) -> FBig<HalfEven> {
-        let ctx: Context<mode::HalfEven> = self.ctx();
-        let x = x.clone();
-        let sx: FBig<HalfEven> = ctx
-            .sqrt(x.repr())
-            .expect("sqrt of a finite, non-negative FBig cannot fail")
-            .value();
-        sx
-    }
-
-    pub fn log(self, x: FBig<HalfEven>) -> FBig<HalfEven> {
-        let ctx: Context<mode::HalfEven> = self.ctx();
-        ctx.ln(x.repr(), None)
-            .expect("ln of a finite, positive FBig cannot fail")
-            .value()
+        self.ib(IBig::from(2)).sqrt()
     }
 
     pub fn sign(self, x: FBig<HalfEven>) -> i8 {

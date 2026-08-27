@@ -80,7 +80,7 @@ pub fn step_lemma(
         );
         reduction(ellipse_pair, op_g_l, op_g_r, &op_x)
     } else if ellipse_pair.bias() > check0 || ellipse_pair.bias() < check1 {
-        let n: IBig = ((prec.log(ellipse_pair.bias()) / prec.log(LAMBDA.to_real(prec)))
+        let n: IBig = ((ellipse_pair.bias().ln() / LAMBDA.to_real(prec).ln())
             / prec.ib(IBig::from(8)))
         .round()
         .try_into()
@@ -97,7 +97,7 @@ pub fn step_lemma(
     } else if ellipse_pair.skew() <= prec.ib(IBig::from(15)) {
         (ellipse_pair, op_g_l.clone(), op_g_r.clone(), true)
     } else if ellipse_pair.bias() > check2 || ellipse_pair.bias() < check3 {
-        let n: i32 = ((prec.log(ellipse_pair.bias()) / prec.log(LAMBDA.to_real(prec)))
+        let n: i32 = ((ellipse_pair.bias().ln() / LAMBDA.to_real(prec).ln())
             / prec.ib(IBig::from(4)))
         .round()
         .try_into()

@@ -247,7 +247,7 @@ mod tests {
         let eps_sq = &epsilon * &epsilon;
         let half_eps_sq = &eps_sq / &four;
         let one_minus_half_eps_sq = &one - &half_eps_sq;
-        let d = PREC.fb(PREC.sqrt(&one_minus_half_eps_sq) * PREC.sqrt(&scale.to_real(PREC)));
+        let d = PREC.fb(one_minus_half_eps_sq.sqrt() * scale.to_real(PREC).sqrt());
 
         for u in sample_domegas() {
             let re_w = frame.re_w(&u);
@@ -356,8 +356,8 @@ mod tests {
     fn diagonal_diamond_distance_matches_closed_form() {
         // Re(w) = cos(delta) for delta = 0.05: distance should be 2*sin(0.05).
         let delta = to_fbig(0.05);
-        let re_w = PREC.cos(&delta);
-        let expected = to_fbig(2.0) * (PREC.sin(&delta));
+        let re_w = delta.cos();
+        let expected = to_fbig(2.0) * (delta.sin());
         let dist = diagonal_diamond_distance(PREC, &re_w);
         assert!(
             approx_eq(&dist, &expected, 200),
