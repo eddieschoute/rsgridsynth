@@ -16,7 +16,6 @@ use dashu_float::round::mode::HalfEven;
 use dashu_float::FBig;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use rsgridsynth::clear_caches;
 use rsgridsynth::config::config_from_theta_epsilon;
 use rsgridsynth::protocol::{
     exact_q, synth_fallback, synth_mixed_diagonal, synth_mixed_fallback, AchievedDiamondError,
@@ -56,7 +55,6 @@ fn fuzz_mixed_diagonal_accuracy() {
     let thetas = random_angles(0xD1A6_0001, 6);
     for &epsilon in &EPSILONS {
         for &theta in &thetas {
-            clear_caches();
             let result = synth_mixed_diagonal(theta, epsilon, 7, false);
             let theta_fbig = theta_at_matching_precision(theta, epsilon);
 
@@ -106,11 +104,10 @@ fn fuzz_mixed_diagonal_accuracy() {
 #[serial]
 fn fuzz_fallback_accuracy() {
     let q = exact_q(7);
-    let q_real_f64 = fbig_to_f64(&q.to_real());
+    let q_real_f64 = fbig_to_f64(&q.to_real(rsgridsynth::common::Prec(1000)));
     let thetas = random_angles(0xFA11_0002, 6);
     for &epsilon in &EPSILONS {
         for &theta in &thetas {
-            clear_caches();
             let sin_alpha = epsilon / 4.0;
             let Some(result) = synth_fallback(theta, epsilon, q.clone(), sin_alpha, 7, false)
             else {
@@ -151,18 +148,17 @@ fn fuzz_fallback_accuracy() {
 #[serial]
 fn fuzz_mixed_fallback_accuracy() {
     let q = exact_q(7);
-    let q_real_f64 = fbig_to_f64(&q.to_real());
+    let q_real_f64 = fbig_to_f64(&q.to_real(rsgridsynth::common::Prec(1000)));
     let thetas = random_angles(0xFA11_0003, 6);
     for &epsilon in &EPSILONS {
         for &theta in &thetas {
-            clear_caches();
             let Some(result) = synth_mixed_fallback(theta, epsilon, q.clone(), 7, false) else {
                 continue;
             };
             let theta_fbig = theta_at_matching_precision(theta, epsilon);
 
             match &result {
-                MixedFallbackResult::Exact { gates } => {
+                MixedFallbackResult::Exact { gates, .. } => {
                     assert!(
                         !gates.is_empty(),
                         "theta={theta}, epsilon={epsilon:e}: exact result has empty gates"

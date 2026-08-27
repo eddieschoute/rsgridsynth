@@ -34,11 +34,10 @@
 use crate::accuracy::{
     achieved_diagonal_diamond_error, achieved_phase_diamond_error, AchievedDiamondError, WFrame,
 };
-use crate::common::{cos_fbig, fb_with_prec, ib_to_bf_prec, sin_fbig};
+use crate::common::Prec;
 use crate::config::{config_from_theta_epsilon, GridSynthConfig};
 use crate::gate::{Gate, GateSeq};
 use crate::gridsynth::{setup_regions_and_transform, UnitDisk};
-use crate::math::sqrt_fbig;
 use crate::protocol::fallback::{
     half_angle_cos_sin, phase_cos_sin, residual_diamond_error_mixed, SectorRegion,
 };
@@ -66,6 +65,8 @@ pub struct MixedFallbackSide {
     /// The mixed-diagonal correction for this side's residual angle, needed with probability
     /// `1 - achieved_success_probability()`.
     pub correction: MixedDiagonalResult,
+    /// The working precision this side was synthesized at.
+    pub prec: Prec,
 }
 
 impl MixedFallbackSide {
@@ -73,9 +74,10 @@ impl MixedFallbackSide {
     /// `projective_gates` string. Mirrors
     /// [`crate::protocol::fallback::FallbackResult::achieved_success_probability`].
     pub fn achieved_success_probability(&self) -> FBig<HalfEven> {
+        let prec = self.prec;
         let u = DOmegaUnitary::from_gates(&self.projective_gates);
         let z = u.z();
-        fb_with_prec(fb_with_prec(z.real() * z.real()) + fb_with_prec(z.imag() * z.imag()))
+        (z.real(prec) * z.real(prec)) + (z.imag(prec) * z.imag(prec))
     }
 }
 
@@ -86,11 +88,12 @@ impl MixedFallbackSide {
 /// triangle-inequality-summing each individual (twirled) branch's distance, which would throw
 /// away the mixture's quadratic error cancellation and wildly overstate the achieved error.
 fn weighted_correction_distance(
+    prec: Prec,
     theta: &FBig<HalfEven>,
     projective_gates: &[Gate],
     correction: &MixedDiagonalResult,
 ) -> FBig<HalfEven> {
-    residual_diamond_error_mixed(theta, projective_gates, correction)
+    residual_diamond_error_mixed(prec, theta, projective_gates, correction)
 }
 
 impl AchievedDiamondError for MixedFallbackSide {
@@ -106,16 +109,15 @@ impl AchievedDiamondError for MixedFallbackSide {
     /// helper -- this side's projective candidate has `|z|^2 = q < 1` by construction, same
     /// caveat as plain fallback's.
     fn achieved_diamond_error(&self, theta: &FBig<HalfEven>) -> FBig<HalfEven> {
+        let prec = self.prec;
         let p_success = self.achieved_success_probability();
-        let success_dist = achieved_phase_diamond_error(theta, &self.projective_gates);
+        let success_dist = achieved_phase_diamond_error(prec, theta, &self.projective_gates);
         let failure_dist =
-            weighted_correction_distance(theta, &self.projective_gates, &self.correction);
+            weighted_correction_distance(prec, theta, &self.projective_gates, &self.correction);
 
-        let one = ib_to_bf_prec(IBig::ONE);
-        let one_minus_p = fb_with_prec(&one - &p_success);
-        fb_with_prec(
-            fb_with_prec(&p_success * &success_dist) + fb_with_prec(&one_minus_p * &failure_dist),
-        )
+        let one = prec.ib(IBig::ONE);
+        let one_minus_p = &one - &p_success;
+        (&p_success * &success_dist) + (&one_minus_p * &failure_dist)
     }
 }
 
@@ -128,7 +130,7 @@ pub enum MixedFallbackResult {
     /// `pi/2`): a single gate word suffices, with zero error and no fallback structure at
     /// all -- mirrors [`crate::protocol::mixed_diagonal::MixedDiagonalResult`]'s analogous
     /// degenerate case.
-    Exact { gates: GateSeq },
+    Exact { gates: GateSeq, prec: Prec },
     /// The general case: two straddling projective branches, mixed with probability `p`
     /// (`lo` at weight `p`, `hi` at weight `1-p`), each with its own achieved success
     /// probability and mixed-diagonal correction.
@@ -174,33 +176,35 @@ impl AchievedDiamondError for MixedFallbackResult {
     /// rather than assuming zero.
     fn achieved_diamond_error(&self, theta: &FBig<HalfEven>) -> FBig<HalfEven> {
         match self {
-            MixedFallbackResult::Exact { gates } => achieved_diagonal_diamond_error(theta, gates),
+            MixedFallbackResult::Exact { gates, prec } => {
+                achieved_diagonal_diamond_error(*prec, theta, gates)
+            }
             MixedFallbackResult::Mixed { lo, hi, p } => {
-                let wframe = WFrame::new(theta);
+                let prec = lo.prec;
+                let wframe = WFrame::new(prec, theta);
                 let lo_u = DOmegaUnitary::from_gates(&lo.projective_gates);
                 let hi_u = DOmegaUnitary::from_gates(&hi.projective_gates);
                 let re_lo = wframe.re_w(lo_u.z());
                 let im_lo = wframe.im_w(lo_u.z());
                 let re_hi = wframe.re_w(hi_u.z());
                 let im_hi = wframe.im_w(hi_u.z());
-                let projective_term = mixture_weight((&re_lo, &im_lo), (&re_hi, &im_hi))
+                let projective_term = mixture_weight(prec, (&re_lo, &im_lo), (&re_hi, &im_hi))
                     .expect("a real assembled Mixed result must yield a valid mixture")
                     .projective_diamond_error;
 
-                let one = ib_to_bf_prec(IBig::ONE);
-                let one_minus_p = fb_with_prec(&one - p);
-                let lo_fail_prob = fb_with_prec(&one - &lo.achieved_success_probability());
-                let hi_fail_prob = fb_with_prec(&one - &hi.achieved_success_probability());
+                let one = prec.ib(IBig::ONE);
+                let one_minus_p = &one - p;
+                let lo_fail_prob = &one - &lo.achieved_success_probability();
+                let hi_fail_prob = &one - &hi.achieved_success_probability();
                 let lo_failure_dist =
-                    weighted_correction_distance(theta, &lo.projective_gates, &lo.correction);
+                    weighted_correction_distance(prec, theta, &lo.projective_gates, &lo.correction);
                 let hi_failure_dist =
-                    weighted_correction_distance(theta, &hi.projective_gates, &hi.correction);
+                    weighted_correction_distance(prec, theta, &hi.projective_gates, &hi.correction);
 
-                let lo_term = fb_with_prec(fb_with_prec(p * &lo_fail_prob) * &lo_failure_dist);
-                let hi_term =
-                    fb_with_prec(fb_with_prec(&one_minus_p * &hi_fail_prob) * &hi_failure_dist);
+                let lo_term = (p * &lo_fail_prob) * &lo_failure_dist;
+                let hi_term = (&one_minus_p * &hi_fail_prob) * &hi_failure_dist;
 
-                fb_with_prec(fb_with_prec(&projective_term + &lo_term) + &hi_term)
+                (&projective_term + &lo_term) + &hi_term
             }
         }
     }
@@ -210,6 +214,7 @@ impl AchievedDiamondError for MixedFallbackResult {
 /// projective candidate to gates, derives the residual angle theta_B, and searches for that
 /// residual's mixed-diagonal correction.
 fn build_side(
+    prec: Prec,
     projective_unitary: DOmegaUnitary,
     theta_z_x: &FBig<HalfEven>,
     theta_z_y: &FBig<HalfEven>,
@@ -225,30 +230,29 @@ fn build_side(
     // cos(-theta/2)*sin(phi/2), with (cos(phi/2), sin(phi/2)) from half_angle_cos_sin applied
     // to (cos(phi), sin(phi)) = (Re(v), Im(v)) / |v| (see `phase_cos_sin`'s docs for the
     // degenerate `v = 0` case).
-    let (cos_phi, sin_phi, v_norm_sq) = phase_cos_sin(&v);
-    let (cos_half_phi, sin_half_phi) = half_angle_cos_sin(&cos_phi, &sin_phi);
+    let (cos_phi, sin_phi, v_norm_sq) = phase_cos_sin(prec, &v);
+    let (cos_half_phi, sin_half_phi) = half_angle_cos_sin(prec, &cos_phi, &sin_phi);
 
-    let cos_neg_theta_b_half = fb_with_prec(
-        fb_with_prec(theta_z_x * &cos_half_phi) - fb_with_prec(theta_z_y * &sin_half_phi),
-    );
-    let sin_neg_theta_b_half = fb_with_prec(
-        fb_with_prec(theta_z_y * &cos_half_phi) + fb_with_prec(theta_z_x * &sin_half_phi),
-    );
+    let cos_neg_theta_b_half =
+        prec.fb(prec.fb(theta_z_x * &cos_half_phi) - prec.fb(theta_z_y * &sin_half_phi));
+    let sin_neg_theta_b_half =
+        prec.fb(prec.fb(theta_z_y * &cos_half_phi) + prec.fb(theta_z_x * &sin_half_phi));
 
     // Same ep2 = (eps/2)/|v|^2 recipe as plain fallback's correction budget.
-    let two = fb_with_prec(FBig::try_from(2.0).unwrap());
-    let epsilon_for_correction = fb_with_prec(fb_with_prec(epsilon_spec / &two) / &v_norm_sq);
+    let two = prec.fb(FBig::try_from(2.0).unwrap());
+    let epsilon_for_correction = (epsilon_spec / &two) / &v_norm_sq;
 
     let exact_scale = ZRootTwo::new(IBig::from(1), IBig::from(0));
     let correction_region = MixedDiagonalRegion::from_target_direction(
+        prec,
         cos_neg_theta_b_half.clone(),
         sin_neg_theta_b_half.clone(),
         &epsilon_for_correction,
         exact_scale.clone(),
     );
-    let correction_unit_disk = UnitDisk::new(exact_scale);
+    let correction_unit_disk = UnitDisk::new(prec, exact_scale);
     let correction_wframe =
-        WFrame::from_target_direction(cos_neg_theta_b_half, sin_neg_theta_b_half);
+        WFrame::from_target_direction(prec, cos_neg_theta_b_half, sin_neg_theta_b_half);
     let correction_transform = setup_regions_and_transform(
         &correction_region,
         &correction_unit_disk,
@@ -263,11 +267,12 @@ fn build_side(
         &correction_wframe,
         &epsilon_for_correction,
     );
-    let correction = assemble_result(correction_outcome, &correction_wframe);
+    let correction = assemble_result(prec, correction_outcome, &correction_wframe);
 
     MixedFallbackSide {
         projective_gates,
         correction,
+        prec,
     }
 }
 
@@ -290,18 +295,19 @@ pub fn synth_mixed_fallback(
     verbose: bool,
 ) -> Option<MixedFallbackResult> {
     let mut config = config_from_theta_epsilon(theta, epsilon_diamond, seed, verbose, false);
-    let epsilon_spec = diamond_to_spec_epsilon(&config.epsilon);
+    let prec = config.prec;
+    let epsilon_spec = diamond_to_spec_epsilon(prec, &config.epsilon);
 
     // Mixed protocols' wider angular half-width: sin(alpha) = sqrt(eps/2), vs. plain
     // fallback's eps/2 (Prop 3.16 vs. Prop 3.9).
-    let two = fb_with_prec(FBig::try_from(2.0).unwrap());
-    let half_eps = fb_with_prec(&epsilon_spec / &two);
-    let sin_alpha = sqrt_fbig(&half_eps);
+    let two = prec.fb(FBig::try_from(2.0).unwrap());
+    let half_eps = &epsilon_spec / &two;
+    let sin_alpha = half_eps.sqrt();
 
     let scale = ZRootTwo::new(IBig::from(1), IBig::from(0));
-    let sector_region = SectorRegion::new(&config.theta, q, sin_alpha, scale.clone());
-    let unit_disk = UnitDisk::new(scale);
-    let wframe = WFrame::new(&config.theta);
+    let sector_region = SectorRegion::new(prec, &config.theta, q, sin_alpha, scale.clone());
+    let unit_disk = UnitDisk::new(prec, scale);
+    let wframe = WFrame::new(prec, &config.theta);
 
     let transform = setup_regions_and_transform(
         &sector_region,
@@ -322,6 +328,7 @@ pub fn synth_mixed_fallback(
         StraddleOutcome::NotFound => None,
         StraddleOutcome::Unmixed(u) => Some(MixedFallbackResult::Exact {
             gates: decompose_domega_unitary(u),
+            prec,
         }),
         StraddleOutcome::Mixed(lo, hi) => {
             let hi = *hi;
@@ -329,17 +336,17 @@ pub fn synth_mixed_fallback(
             let im_lo = wframe.im_w(lo.z());
             let re_hi = wframe.re_w(hi.z());
             let im_hi = wframe.im_w(hi.z());
-            let mw = mixture_weight((&re_lo, &im_lo), (&re_hi, &im_hi)).expect(
+            let mw = mixture_weight(prec, (&re_lo, &im_lo), (&re_hi, &im_hi)).expect(
                 "mixture_weight returned None for a real solved straddling pair -- this \
                  indicates a genuine bug, not an expected degenerate input",
             );
 
-            let neg_theta_half = -fb_with_prec(&config.theta / &two);
-            let theta_z_x = fb_with_prec(cos_fbig(&neg_theta_half));
-            let theta_z_y = fb_with_prec(sin_fbig(&neg_theta_half));
+            let neg_theta_half = -prec.fb(&config.theta / &two);
+            let theta_z_x = prec.fb(neg_theta_half.cos());
+            let theta_z_y = prec.fb(neg_theta_half.sin());
 
-            let lo_side = build_side(lo, &theta_z_x, &theta_z_y, &epsilon_spec, &mut config);
-            let hi_side = build_side(hi, &theta_z_x, &theta_z_y, &epsilon_spec, &mut config);
+            let lo_side = build_side(prec, lo, &theta_z_x, &theta_z_y, &epsilon_spec, &mut config);
+            let hi_side = build_side(prec, hi, &theta_z_x, &theta_z_y, &epsilon_spec, &mut config);
 
             Some(MixedFallbackResult::Mixed {
                 lo: lo_side,
@@ -353,10 +360,10 @@ pub fn synth_mixed_fallback(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::reset_prec_bits;
     use crate::protocol::fallback::exact_q;
-    use serial_test::serial;
     use std::f64::consts::PI;
+
+    const PREC: Prec = Prec(1000);
 
     fn fbig_to_f64(x: &FBig<HalfEven>) -> f64 {
         match x.to_f64() {
@@ -390,15 +397,12 @@ mod tests {
     // exhaustively by `generic_angle_produces_mixed_result_with_valid_structure` below), not
     // that it is always the optimal Exact one.
     #[test]
-    #[serial]
     fn degenerate_angle_produces_a_valid_result() {
-        reset_prec_bits();
-        crate::clear_caches();
         let q = exact_q(7);
         let result = synth_mixed_fallback(PI / 2.0, 1e-6, q, 11, false)
             .expect("search should succeed for theta=pi/2");
         match result {
-            MixedFallbackResult::Exact { gates } => {
+            MixedFallbackResult::Exact { gates, .. } => {
                 assert!(!gates.is_empty());
             }
             MixedFallbackResult::Mixed { p, .. } => {
@@ -412,10 +416,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn generic_angle_produces_mixed_result_with_valid_structure() {
-        reset_prec_bits();
-        crate::clear_caches();
         let q = exact_q(7);
         let result = synth_mixed_fallback(3.0 * PI / 32.0, 1e-6, q.clone(), 13, false)
             .expect("search should succeed for a generic angle");
@@ -424,11 +425,13 @@ mod tests {
                 let p_f64 = fbig_to_f64(&p);
                 assert!((0.0..=1.0).contains(&p_f64), "p={p_f64} out of [0,1] range");
                 assert!(
-                    fbig_to_f64(&lo.achieved_success_probability()) >= fbig_to_f64(&q.to_real()),
+                    fbig_to_f64(&lo.achieved_success_probability())
+                        >= fbig_to_f64(&q.to_real(PREC)),
                     "lo side violates its own success-probability guarantee"
                 );
                 assert!(
-                    fbig_to_f64(&hi.achieved_success_probability()) >= fbig_to_f64(&q.to_real()),
+                    fbig_to_f64(&hi.achieved_success_probability())
+                        >= fbig_to_f64(&q.to_real(PREC)),
                     "hi side violates its own success-probability guarantee"
                 );
                 // Each side's correction branch weights sum to 1 (Stage 1's own invariant,
@@ -453,10 +456,7 @@ mod tests {
     // (p, 1-p), and fits against log2(1/epsilon_diamond). The paper's target for mixed
     // fallback is ~0.53, well below plain fallback's ~1.03 and plain diagonal's ~3.02.
     #[test]
-    #[serial]
     fn mixed_fallback_expected_cost_slope() {
-        reset_prec_bits();
-        crate::clear_caches();
         let q = exact_q(7);
         let epsilons: [f64; 3] = [1e-4, 1e-6, 1e-8];
         let n_angles = 6;
@@ -467,7 +467,6 @@ mod tests {
         for &eps in &epsilons {
             for i in 0..n_angles {
                 let theta = (0.29 + (i as f64) * 0.83 + eps.log10()) % (2.0 * PI);
-                crate::clear_caches();
                 let Some(result) =
                     synth_mixed_fallback(theta, eps, q.clone(), 100 + i as u64, false)
                 else {

@@ -23,12 +23,12 @@ pub mod tdgp;
 pub mod to_upright;
 pub mod unitary;
 
-pub use diophantine::clear_caches;
+pub use diophantine::Caches;
 
 use std::{f32::consts::LOG2_10, time::Instant};
 
 use crate::accuracy::AchievedDiamondError;
-use crate::common::{ib_to_bf_prec, set_prec_bits};
+use crate::common::Prec;
 use crate::config::parse_decimal_with_exponent;
 use crate::config::{DiophantineData, GridSynthConfig};
 use dashu_base::Approximation;
@@ -123,9 +123,14 @@ fn build_command() -> Command {
 }
 
 fn parse_arguments(matches: &clap::ArgMatches) -> GridSynthConfig {
+    // `theta` is built at a fixed precision independent of the epsilon/dps-derived working
+    // precision computed below -- mirrors `config::config_from_theta_epsilon`'s own
+    // `THETA_PREC`, so the CLI and library paths agree. See the module docs on working
+    // precision for why this inconsistency is preserved rather than fixed here.
+    const THETA_PREC: Prec = Prec(1000);
     let theta_str = matches.get_one::<String>("theta").unwrap();
     let (theta_num, theta_den) = parse_decimal_with_exponent(theta_str).unwrap();
-    let theta = ib_to_bf_prec(theta_num) / ib_to_bf_prec(theta_den);
+    let theta = THETA_PREC.ib(theta_num) / THETA_PREC.ib(theta_den);
     let epsilon_str = matches.get_one::<String>("epsilon").unwrap();
     let (epsilon_num, epsilon_den) = parse_decimal_with_exponent(epsilon_str).unwrap();
     let dps: Option<u32> = matches
@@ -140,8 +145,8 @@ fn parse_arguments(matches: &clap::ArgMatches) -> GridSynthConfig {
         calculated_prec_bits
     };
     let prec_bits = if prec_bits < 16 { 16 } else { prec_bits };
-    set_prec_bits(prec_bits);
-    let epsilon = ib_to_bf_prec(epsilon_num) / ib_to_bf_prec(epsilon_den);
+    let prec = Prec(prec_bits);
+    let epsilon = prec.ib(epsilon_num) / prec.ib(epsilon_den);
     let diophantine_timeout = matches
         .get_one::<String>("dtimeout")
         .unwrap()
@@ -162,11 +167,13 @@ fn parse_arguments(matches: &clap::ArgMatches) -> GridSynthConfig {
         diophantine_timeout,
         factoring_timeout,
         rng,
+        caches: Caches::default(),
     };
 
     GridSynthConfig {
         theta,
         epsilon,
+        prec,
         verbose,
         measure_time,
         diophantine_data,

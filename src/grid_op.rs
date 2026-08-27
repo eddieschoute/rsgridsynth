@@ -2,6 +2,7 @@
 // Licensed under the MIT License. See LICENSE file in the project root for full license information.
 
 use crate::{
+    common::Prec,
     region::Ellipse,
     ring::{DOmega, ZOmega},
 };
@@ -100,10 +101,10 @@ impl GridOp {
         v.a + v.c == IBig::ZERO && (v.b == IBig::ONE || v.b == IBig::NEG_ONE)
     }
 
-    pub fn to_mat(&self) -> [[FBig<HalfEven>; 2]; 2] {
+    pub fn to_mat(&self, prec: Prec) -> [[FBig<HalfEven>; 2]; 2] {
         [
-            [self.u0.real(), self.u1.real()],
-            [self.u0.imag(), self.u1.imag()],
+            [self.u0.real(prec), self.u1.real(prec)],
+            [self.u0.imag(prec), self.u1.imag(prec)],
         ]
     }
 
@@ -267,7 +268,8 @@ impl Pow<i32> for GridOp {
 impl Mul<Ellipse> for &GridOp {
     type Output = Ellipse;
     fn mul(self, rhs: Ellipse) -> Ellipse {
-        let inv = self.inv().expect("GridOp must be special").to_mat();
+        let prec = rhs.prec;
+        let inv = self.inv().expect("GridOp must be special").to_mat(prec);
         let m00 = &inv[0][0];
         let m01 = &inv[0][1];
         let m10 = &inv[1][0];
@@ -306,7 +308,7 @@ impl Mul<Ellipse> for &GridOp {
 
         let new_d = Matrix2::new(a, b.clone(), b, d);
 
-        let mat = self.to_mat();
+        let mat = self.to_mat(prec);
         let mat00 = &mat[0][0];
         let mat01 = &mat[0][1];
         let mat10 = &mat[1][0];
@@ -321,6 +323,6 @@ impl Mul<Ellipse> for &GridOp {
         let py = py_term1 + py_term2;
         let new_p = Vector2::new(px, py);
 
-        Ellipse::new(new_d, new_p)
+        Ellipse::new(new_d, new_p, prec)
     }
 }

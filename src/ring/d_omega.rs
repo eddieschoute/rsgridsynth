@@ -10,7 +10,8 @@ use std::cmp::{Ordering, PartialEq};
 use std::fmt::{Debug, Display, Formatter, Result};
 use std::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 
-use crate::math::{ntz, pow_sqrt2};
+use crate::common::Prec;
+use crate::math::ntz;
 use crate::ring::{DRootTwo, ZOmega, ZRootTwo};
 
 #[derive(Clone)]
@@ -61,20 +62,26 @@ impl DOmega {
         (term0 + term1).renew_denomexp(k)
     }
 
-    pub fn scale(&self) -> &FBig<HalfEven> {
-        self.scale_cache.get_or_init(|| pow_sqrt2(self.k))
+    /// Memoized at whatever `prec` this is first called with -- per-instance, not global, so
+    /// this is not the ambient-precision hazard the rest of this crate avoids, but a caller
+    /// that reuses one long-lived `DOmega` across two different precisions would still see
+    /// the first one "stick" here.
+    pub fn scale(&self, prec: Prec) -> &FBig<HalfEven> {
+        self.scale_cache.get_or_init(|| prec.pow_sqrt2(self.k))
     }
 
-    pub fn real(&self) -> &FBig<HalfEven> {
-        self.real_cache.get_or_init(|| self.u.real() / self.scale())
+    pub fn real(&self, prec: Prec) -> &FBig<HalfEven> {
+        self.real_cache
+            .get_or_init(|| self.u.real(prec) / self.scale(prec))
     }
 
-    pub fn imag(&self) -> &FBig<HalfEven> {
-        self.imag_cache.get_or_init(|| self.u.imag() / self.scale())
+    pub fn imag(&self, prec: Prec) -> &FBig<HalfEven> {
+        self.imag_cache
+            .get_or_init(|| self.u.imag(prec) / self.scale(prec))
     }
 
-    pub fn to_complex(&self) -> Complex<&FBig<HalfEven>> {
-        Complex::new(self.real(), self.imag())
+    pub fn to_complex(&self, prec: Prec) -> Complex<&FBig<HalfEven>> {
+        Complex::new(self.real(prec), self.imag(prec))
     }
 
     pub fn conj(&self) -> &Self {

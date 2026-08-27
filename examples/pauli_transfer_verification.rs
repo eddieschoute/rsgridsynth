@@ -10,9 +10,8 @@
 //! ## Arbitrary precision throughout, not `f64`
 //!
 //! Every quantity in this file -- matrix entries, Pauli transfer matrices, angular
-//! differences -- is computed as `FBig<HalfEven>` at the crate's own working precision
-//! (`rsgridsynth::common::get_prec_bits()`, set by whichever `synth_*` call ran most
-//! recently), never downcast to `f64` until the final printed digits. An earlier version of
+//! differences -- is computed as `FBig<HalfEven>` at this file's own fixed working precision
+//! (`PREC` below), never downcast to `f64` until the final printed digits. An earlier version of
 //! this file converted synthesized matrices to `f64` immediately and computed
 //! `2*sqrt(1-Re(w)^2)`: at epsilon ~1e-8 the true angular error can be ~1e-9, at which point
 //! `Re(w)` rounds to exactly `1.0` in `f64` (whose resolution near 1.0 is ~2.2e-16), and
@@ -73,15 +72,20 @@ use dashu_float::round::mode::HalfEven;
 use dashu_float::FBig;
 use dashu_int::IBig;
 use num::Complex;
-use rsgridsynth::clear_caches;
-use rsgridsynth::common::{cos_fbig, fb_with_prec, ib_to_bf_prec, sin_fbig};
-use rsgridsynth::math::{sign, sqrt_fbig};
+use rsgridsynth::common::Prec;
 use rsgridsynth::protocol::fallback::exact_q;
 use rsgridsynth::protocol::{
     synth_fallback, synth_mixed_diagonal, synth_mixed_fallback, FallbackResult,
     MixedDiagonalResult, MixedFallbackResult, MixedFallbackSide,
 };
 use rsgridsynth::unitary::DOmegaUnitary;
+
+/// Fixed, generous working precision for this file's independent verification arithmetic.
+/// Precision is explicit everywhere in this crate now (no ambient/global state), so this
+/// file picks its own -- deliberately larger than any epsilon tested below needs, since the
+/// whole point of an independent check is to not inherit the crate's own per-epsilon
+/// precision budget.
+const PREC: Prec = Prec(2000);
 
 type Fb = FBig<HalfEven>;
 
@@ -98,7 +102,7 @@ type Fb = FBig<HalfEven>;
 /// different angle than the crate actually solved for.
 fn to_fbig(x: f64) -> Fb {
     let (num, den) = rsgridsynth::config::parse_decimal_with_exponent(&x.to_string()).unwrap();
-    fdiv(&ib_to_bf_prec(num), &ib_to_bf_prec(den))
+    fdiv(&PREC.ib(num), &PREC.ib(den))
 }
 
 fn to_f64(x: &Fb) -> f64 {
@@ -109,31 +113,31 @@ fn to_f64(x: &Fb) -> f64 {
 }
 
 fn fzero() -> Fb {
-    ib_to_bf_prec(IBig::ZERO)
+    PREC.ib(IBig::ZERO)
 }
 
 fn fone() -> Fb {
-    ib_to_bf_prec(IBig::ONE)
+    PREC.ib(IBig::ONE)
 }
 
 fn fadd(a: &Fb, b: &Fb) -> Fb {
-    fb_with_prec(a + b)
+    a + b
 }
 
 fn fsub(a: &Fb, b: &Fb) -> Fb {
-    fb_with_prec(a - b)
+    a - b
 }
 
 fn fmul(a: &Fb, b: &Fb) -> Fb {
-    fb_with_prec(a * b)
+    a * b
 }
 
 fn fdiv(a: &Fb, b: &Fb) -> Fb {
-    fb_with_prec(a / b)
+    a / b
 }
 
 fn fneg(a: &Fb) -> Fb {
-    -fb_with_prec(a.clone())
+    -(a.clone())
 }
 
 /// Arbitrary-precision complex number. `+`/`-`/`*`/[`Complex::conj`]/[`Complex::scale`]/
@@ -153,7 +157,7 @@ fn cx_real(x: Fb) -> Cx {
 }
 
 fn cx_abs(z: &Cx) -> Fb {
-    sqrt_fbig(&z.norm_sqr())
+    z.norm_sqr().sqrt()
 }
 
 type M2 = [[Cx; 2]; 2];
@@ -167,7 +171,7 @@ fn zero_mat4() -> [[Fb; 4]; 4] {
 }
 
 fn matrix_from_gates(gates: &[rsgridsynth::gate::Gate]) -> M2 {
-    let m = DOmegaUnitary::from_gates(gates).to_complex_matrix();
+    let m = DOmegaUnitary::from_gates(gates).to_complex_matrix(PREC);
     [
         [
             Cx::new(m[(0, 0)].re.clone(), m[(0, 0)].im.clone()),
@@ -219,7 +223,7 @@ fn pauli_basis() -> [M2; 4] {
 fn ptm(branches: &[(Fb, M2)]) -> [[Fb; 4]; 4] {
     let sigma = pauli_basis();
     let mut r = zero_mat4();
-    let half = fdiv(&fone(), &ib_to_bf_prec(IBig::from(2)));
+    let half = fdiv(&fone(), &PREC.ib(IBig::from(2)));
     for (q_idx, sq) in sigma.iter().enumerate() {
         let mut lambda_sq = zero_m2();
         for (weight, u) in branches {
@@ -254,9 +258,9 @@ fn target_matrix_from_half(cos_half: &Fb, sin_half: &Fb) -> M2 {
 }
 
 fn target_matrix(theta: &Fb) -> M2 {
-    let two = ib_to_bf_prec(IBig::from(2));
+    let two = PREC.ib(IBig::from(2));
     let half = fdiv(theta, &two);
-    target_matrix_from_half(&cos_fbig(&half), &sin_fbig(&half))
+    target_matrix_from_half(&half.cos(), &half.sin())
 }
 
 /// `delta_q_P` from the diagonal of a *difference* of two channels' PTMs (each channel's own
@@ -264,7 +268,7 @@ fn target_matrix(theta: &Fb) -> M2 {
 /// linear part applies -- verified in `debug_tests` below by checking a channel against
 /// itself gives exactly 0, not the `1` a naive "reapply the affine +1 formula" mistake gives).
 fn delta_q_from_ptm_diagonal_difference(diff_diag: &[Fb; 4]) -> [Fb; 4] {
-    let four = ib_to_bf_prec(IBig::from(4));
+    let four = PREC.ib(IBig::from(4));
     let xx = &diff_diag[1];
     let yy = &diff_diag[2];
     let zz = &diff_diag[3];
@@ -343,12 +347,12 @@ fn half_angle_cos_sin(cos_phi: &Fb, sin_phi: &Fb) -> (Fb, Fb) {
     if *sin_phi == zero && *cos_phi < zero {
         return (zero, fone());
     }
-    let two = ib_to_bf_prec(IBig::from(2));
+    let two = PREC.ib(IBig::from(2));
     let one_plus_cos = fadd(&fone(), cos_phi);
     let one_minus_cos = fsub(&fone(), cos_phi);
-    let cos_half = sqrt_fbig(&fdiv(&one_plus_cos, &two));
-    let sin_half_mag = sqrt_fbig(&fdiv(&one_minus_cos, &two));
-    let sin_half = if sign(sin_phi.clone()) < 0 {
+    let cos_half = fdiv(&one_plus_cos, &two).sqrt();
+    let sin_half_mag = fdiv(&one_minus_cos, &two).sqrt();
+    let sin_half = if rsgridsynth::math::sign(sin_phi) < 0 {
         fneg(&sin_half_mag)
     } else {
         sin_half_mag
@@ -360,12 +364,12 @@ fn half_angle_cos_sin(cos_phi: &Fb, sin_phi: &Fb) -> (Fb, Fb) {
 /// `(cos(Arg v), sin(Arg v)) = (Re(v), Im(v)) / |v|` -- no `atan2` needed, `Arg(v)` itself is
 /// never materialized as a number.
 fn residual_cos_sin(theta: &Fb, v: &Cx) -> (Fb, Fb) {
-    let norm = sqrt_fbig(&v.norm_sqr());
+    let norm = v.norm_sqr().sqrt();
     let inv_norm = fdiv(&fone(), &norm);
     let cos_argv = fmul(&v.re, &inv_norm);
     let sin_argv = fmul(&v.im, &inv_norm);
-    let cos_theta = cos_fbig(theta);
-    let sin_theta = sin_fbig(theta);
+    let cos_theta = theta.cos();
+    let sin_theta = theta.sin();
     let cos_res = fadd(&fmul(&cos_theta, &cos_argv), &fmul(&sin_theta, &sin_argv));
     let sin_res = fsub(&fmul(&sin_theta, &cos_argv), &fmul(&cos_theta, &sin_argv));
     (cos_res, sin_res)
@@ -384,15 +388,15 @@ fn residual_cos_sin(theta: &Fb, v: &Cx) -> (Fb, Fb) {
 /// had, caught by comparing against `plain_diagonal_epsilon_convention_calibration`'s
 /// epsilon-scaling expectation.
 fn single_rotation_diamond_distance(z: &Cx, theta: &Fb) -> Fb {
-    let norm = sqrt_fbig(&z.norm_sqr());
+    let norm = z.norm_sqr().sqrt();
     let phase = z.scale(fdiv(&fone(), &norm));
-    let two = ib_to_bf_prec(IBig::from(2));
+    let two = PREC.ib(IBig::from(2));
     let half = fdiv(theta, &two);
-    let c = cos_fbig(&half);
-    let s = sin_fbig(&half);
+    let c = half.cos();
+    let s = half.sin();
     // Im(w) = z_x*Im(u) - z_y*Re(u), z_x = cos(half), z_y = -sin(half) (WFrame's convention).
     let im_w = fadd(&fmul(&phase.im, &c), &fmul(&phase.re, &s));
-    fmul(&ib_to_bf_prec(IBig::from(2)), &im_w.abs())
+    fmul(&PREC.ib(IBig::from(2)), &im_w.abs())
 }
 
 /// `(z/|z|)^2 = e^{2i*Arg(z)}`, computed as `z^2 / |z|^2` (a single division by the *squared*
@@ -426,7 +430,7 @@ fn phase_sq_from_z(z: &Cx) -> Cx {
 /// check) is too loose to see the cancellation at all, and wrongly looks like a failure.
 fn rotation_mixture_diamond_distance(weighted_phase_sq: &[(Fb, Cx)], theta: &Fb) -> Fb {
     let mut c = cx_zero();
-    let target_phase = Cx::new(cos_fbig(theta), fneg(&sin_fbig(theta))); // e^{-i*theta}
+    let target_phase = Cx::new(theta.cos(), fneg(&theta.sin())); // e^{-i*theta}
     for (w, phase_sq) in weighted_phase_sq {
         let diff = phase_sq - &target_phase;
         c = &c + &diff.scale(w.clone());
@@ -555,7 +559,6 @@ fn main() {
         for (i, &theta_f64) in thetas.iter().enumerate() {
             let seed = 2000 + i as u64;
 
-            clear_caches();
             let md = synth_mixed_diagonal(theta_f64, eps, seed, false);
             let theta = to_fbig(theta_f64);
             let eps_fb = to_fbig(eps);
@@ -568,7 +571,6 @@ fn main() {
                 dd <= eps_fb
             );
 
-            clear_caches();
             let sin_alpha = eps / 4.0;
             match synth_fallback(theta_f64, eps, q.clone(), sin_alpha, seed, false) {
                 Some(result) => {
@@ -588,9 +590,8 @@ fn main() {
                 None => println!("fallback,{theta_f64},{eps},{eps},ERROR,NotFound,false"),
             }
 
-            clear_caches();
             match synth_mixed_fallback(theta_f64, eps, q.clone(), seed, false) {
-                Some(MixedFallbackResult::Exact { gates }) => {
+                Some(MixedFallbackResult::Exact { gates, .. }) => {
                     let theta = to_fbig(theta_f64);
                     let eps_fb = to_fbig(eps);
                     let m = matrix_from_gates(&gates);
@@ -636,8 +637,6 @@ fn main() {
 #[cfg(test)]
 mod debug_tests {
     use super::*;
-    use rsgridsynth::common::reset_prec_bits;
-    use serial_test::serial;
 
     // `PREC_BITS` (see `rsgridsynth::common`) is a single process-global atomic that every
     // `cos_fbig`/`sin_fbig`/`fb_with_prec` call in this file reads. `cargo test` runs tests in
@@ -653,9 +652,7 @@ mod debug_tests {
     // `reset_prec_bits()` for exactly this reason.
 
     #[test]
-    #[serial]
     fn self_consistency_target_vs_itself() {
-        reset_prec_bits();
         let theta = to_fbig(0.7_f64);
         let m = target_matrix(&theta);
         let (dd, max_od) = pauli_diamond_distance_from_branches(&[(fone(), m)], &theta);
@@ -671,7 +668,6 @@ mod debug_tests {
     /// `q_I=1`, others 0; a pure-Z channel's PTM diagonal is `[1,-1,-1,1]` (Z fixes I and Z,
     /// negates X and Y) and decomposes to `q_Z=1`, others 0.
     #[test]
-    #[serial]
     fn q_from_ptm_diagonal_matches_known_pauli_channels() {
         fn q_from_ptm_diagonal(diag: [f64; 4]) -> [f64; 4] {
             let (xx, yy, zz) = (diag[1], diag[2], diag[3]);
@@ -694,9 +690,7 @@ mod debug_tests {
     }
 
     #[test]
-    #[serial]
     fn identity_channel_vs_target_theta_zero() {
-        reset_prec_bits();
         let theta = to_fbig(0.0_f64);
         let id = [[cx_real(fone()), cx_zero()], [cx_zero(), cx_real(fone())]];
         let (dd, max_od) = pauli_diamond_distance_from_branches(&[(fone(), id)], &theta);
@@ -713,9 +707,7 @@ mod debug_tests {
     /// with `single_rotation_diamond_distance` (both independently derived, one via the
     /// Pauli-transfer/witness argument, one via the direct `2*|Im(w)|` formula).
     #[test]
-    #[serial]
     fn rotation_mixture_matches_single_rotation_special_case() {
-        reset_prec_bits();
         let theta = to_fbig(0.5_f64);
         let z_theta = to_fbig(0.52_f64); // theta + a small angular error, unit modulus target
         let z = target_matrix(&z_theta)[0][0].clone();
@@ -738,9 +730,7 @@ mod debug_tests {
     /// quadratic order in delta, it does not eliminate it. An earlier version of this test
     /// wrongly asserted exactly-zero and "failed" on a numerically-correct result.
     #[test]
-    #[serial]
     fn rotation_mixture_matches_quadratic_cancellation_residual() {
-        reset_prec_bits();
         let theta = to_fbig(0.5_f64);
         let delta = 0.001_f64; // paper's delta_k = Arg(z_k) - theta/2
         let z_lo = target_matrix(&to_fbig(0.5 - 2.0 * delta))[0][0].clone(); // psi_lo = theta/2 - delta
@@ -765,9 +755,7 @@ mod debug_tests {
     }
 
     #[test]
-    #[serial]
     fn single_rotation_distance_matches_known_small_case() {
-        reset_prec_bits();
         // R_z(theta) vs R_z(theta + delta): known exact diamond distance 2*|sin(delta/2)|.
         let theta = to_fbig(0.5_f64);
         let delta = 0.02_f64;
@@ -785,14 +773,12 @@ mod debug_tests {
     /// Calibration check: what does the EXISTING, unmodified plain-diagonal protocol's
     /// `epsilon` parameter actually correspond to in diamond-norm terms?
     #[test]
-    #[serial]
     fn plain_diagonal_epsilon_convention_calibration() {
         use rsgridsynth::config::config_from_theta_epsilon;
         use rsgridsynth::gridsynth::gridsynth_gates;
 
         for &theta_f64 in &[0.1_f64, 0.7, 1.3, 2.5] {
             for &eps in &[1e-3_f64, 1e-4, 1e-5, 1e-6] {
-                clear_caches();
                 let mut config = config_from_theta_epsilon(theta_f64, eps, 42, false, false);
                 let result = gridsynth_gates(&mut config);
                 let theta = to_fbig(theta_f64);

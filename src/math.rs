@@ -1,27 +1,97 @@
 // Copyright (c) 2024-2025 Shun Yamamoto and Nobuyuki Yoshioka, and IBM
 // Licensed under the MIT License. See LICENSE file in the project root for full license information.
 
-use crate::common::{fb_with_prec, get_prec_bits, ib_to_bf_prec};
-use dashu_float::round::mode;
-use dashu_float::Context;
+use crate::common::Prec;
 use dashu_float::{round::mode::HalfEven, FBig};
-use dashu_int::ops::SquareRoot;
 use dashu_int::IBig;
 use std::cmp::Ordering;
 
-pub fn sqrt2() -> FBig<HalfEven> {
-    let ctx: Context<mode::HalfEven> = Context::<mode::HalfEven>::new(get_prec_bits());
-    let x = ib_to_bf_prec(IBig::from(2));
-    let a: FBig<HalfEven> = ctx.sqrt(x.repr()).value();
-    a
+impl Prec {
+    pub fn sqrt2(self) -> FBig<HalfEven> {
+        self.ib(IBig::from(2)).sqrt()
+    }
+
+    pub fn floorsqrt(self, x: FBig<HalfEven>) -> IBig {
+        assert!(x >= self.ib(IBig::ZERO), "Negative input to floorsqrt");
+        self.binary_search_sqrt(x)
+    }
+
+    fn binary_search_sqrt(self, x: FBig<HalfEven>) -> IBig {
+        let mut ok = IBig::ZERO;
+        let mut ng: IBig =
+            <FBig<HalfEven> as TryInto<IBig>>::try_into(x.ceil()).unwrap() + IBig::from(1);
+        while &ng - &ok > IBig::ONE {
+            let mid = &ok + (&ng - &ok) / IBig::from(2);
+            let mid_sqr = self.ib(&mid * &mid);
+            if mid_sqr <= x {
+                ok = mid;
+            } else {
+                ng = mid;
+            }
+        }
+        ok
+    }
+
+    pub fn pow_sqrt2(self, k: i64) -> FBig<HalfEven> {
+        let k_div_2 = k >> 1;
+        let k_mod_2 = k & 1;
+        let base =
+            self.ib(IBig::ONE) << k_div_2.try_into().expect("Shift amount must fit in usize");
+        if k_mod_2 != 0 {
+            base * self.sqrt2()
+        } else {
+            base
+        }
+    }
+
+    pub fn floorlog(self, x: FBig<HalfEven>, y: FBig<HalfEven>) -> (IBig, FBig<HalfEven>) {
+        assert!(x > self.ib(IBig::ZERO), "math domain error");
+        let m = self.compute_precision_requirement(&x, &y);
+        let pow_y = compute_powers(&y, m);
+        self.compute_logarithm(x, y, pow_y)
+    }
+
+    fn compute_precision_requirement(self, x: &FBig<HalfEven>, y: &FBig<HalfEven>) -> usize {
+        let mut tmp = y.clone();
+        let mut m = 0;
+        while x >= &tmp || x * &tmp < self.ib(IBig::ONE) {
+            tmp = &tmp * &tmp;
+            m += 1;
+        }
+        m
+    }
+
+    fn compute_logarithm(
+        self,
+        x: FBig<HalfEven>,
+        y: FBig<HalfEven>,
+        pow_y: Vec<FBig<HalfEven>>,
+    ) -> (IBig, FBig<HalfEven>) {
+        let (mut n, mut r) = if x >= self.ib(IBig::ONE) {
+            (IBig::ZERO, x)
+        } else {
+            (IBig::NEG_ONE, x * pow_y.iter().fold(y, |acc, p| acc * p))
+        };
+
+        for p in pow_y {
+            n <<= 1;
+            if r > p {
+                r /= p;
+                n += 1;
+            }
+        }
+        (n, r)
+    }
 }
 
-// This may be wasteful because of the allocation
-pub fn sqrt_fbig(x: &FBig<HalfEven>) -> FBig<HalfEven> {
-    let ctx: Context<mode::HalfEven> = Context::<mode::HalfEven>::new(get_prec_bits());
-    let x = fb_with_prec(x.clone());
-    let sx: FBig<HalfEven> = ctx.sqrt(x.repr()).value();
-    sx
+/// Sign of `x`, precision-independent: comparing a value to zero doesn't depend on which
+/// precision it (or the zero it's compared against) happens to carry.
+pub fn sign(x: &FBig<HalfEven>) -> i8 {
+    match x.partial_cmp(&FBig::<HalfEven>::ZERO) {
+        Some(Ordering::Greater) => 1,
+        Some(Ordering::Less) => -1,
+        _ => 0,
+    }
 }
 
 pub fn ntz(n: &IBig) -> i64 {
@@ -29,43 +99,6 @@ pub fn ntz(n: &IBig) -> i64 {
         Some(k) => k as i64,
         None => 0,
     }
-}
-
-pub fn log(x: FBig<HalfEven>) -> FBig<HalfEven> {
-    let ctx: Context<mode::HalfEven> = Context::<mode::HalfEven>::new(get_prec_bits());
-    ctx.ln(x.repr()).value()
-}
-
-pub fn sign(x: FBig<HalfEven>) -> i8 {
-    match x.partial_cmp(&ib_to_bf_prec(IBig::ZERO)) {
-        Some(Ordering::Greater) => 1,
-        Some(Ordering::Less) => -1,
-        _ => 0,
-    }
-}
-
-pub fn floorsqrt(x: FBig<HalfEven>) -> IBig {
-    assert!(
-        x >= ib_to_bf_prec(IBig::ZERO),
-        "Negative input to floorsqrt"
-    );
-    binary_search_sqrt(x)
-}
-
-fn binary_search_sqrt(x: FBig<HalfEven>) -> IBig {
-    let mut ok = IBig::ZERO;
-    let mut ng: IBig =
-        <FBig<HalfEven> as TryInto<IBig>>::try_into(x.ceil()).unwrap() + IBig::from(1);
-    while &ng - &ok > IBig::ONE {
-        let mid = &ok + (&ng - &ok) / IBig::from(2);
-        let mid_sqr = ib_to_bf_prec(&mid * &mid);
-        if mid_sqr <= x {
-            ok = mid;
-        } else {
-            ng = mid;
-        }
-    }
-    ok
 }
 
 pub fn rounddiv(x: IBig, y: &IBig) -> IBig {
@@ -77,35 +110,6 @@ pub fn rounddiv(x: IBig, y: &IBig) -> IBig {
     }
 }
 
-pub fn pow_sqrt2(k: i64) -> FBig<HalfEven> {
-    let k_div_2 = k >> 1;
-    let k_mod_2 = k & 1;
-    let base =
-        ib_to_bf_prec(IBig::ONE) << k_div_2.try_into().expect("Shift amount must fit in usize");
-    if k_mod_2 != 0 {
-        base * sqrt2()
-    } else {
-        base
-    }
-}
-
-pub fn floorlog(x: FBig<HalfEven>, y: FBig<HalfEven>) -> (IBig, FBig<HalfEven>) {
-    assert!(x > ib_to_bf_prec(IBig::ZERO), "math domain error");
-    let m = compute_precision_requirement(&x, &y);
-    let pow_y = compute_powers(&y, m);
-    compute_logarithm(x, y, pow_y)
-}
-
-fn compute_precision_requirement(x: &FBig<HalfEven>, y: &FBig<HalfEven>) -> usize {
-    let mut tmp = y.clone();
-    let mut m = 0;
-    while x >= &tmp || x * &tmp < ib_to_bf_prec(IBig::ONE) {
-        tmp = &tmp * &tmp;
-        m += 1;
-    }
-    m
-}
-
 fn compute_powers(y: &FBig<HalfEven>, m: usize) -> Vec<FBig<HalfEven>> {
     let mut pow_y = Vec::with_capacity(m);
     pow_y.push(y.clone());
@@ -115,27 +119,6 @@ fn compute_powers(y: &FBig<HalfEven>, m: usize) -> Vec<FBig<HalfEven>> {
     }
     pow_y.reverse();
     pow_y
-}
-
-fn compute_logarithm(
-    x: FBig<HalfEven>,
-    y: FBig<HalfEven>,
-    pow_y: Vec<FBig<HalfEven>>,
-) -> (IBig, FBig<HalfEven>) {
-    let (mut n, mut r) = if x >= ib_to_bf_prec(IBig::ONE) {
-        (IBig::ZERO, x)
-    } else {
-        (IBig::NEG_ONE, x * pow_y.iter().fold(y, |acc, p| acc * p))
-    };
-
-    for p in pow_y {
-        n <<= 1;
-        if r > p {
-            r /= p;
-            n += 1;
-        }
-    }
-    (n, r)
 }
 
 /// Solves the quadratic equation ax^2 + bx + c = 0 for real roots.
@@ -150,13 +133,14 @@ fn compute_logarithm(
 ///
 /// An `Option` containing a tuple of two roots if they exist; otherwise, `None` if the roots are not real (i.e., the discriminant is negative).
 pub fn solve_quadratic(
+    prec: Prec,
     a: &FBig<HalfEven>,
     b: &FBig<HalfEven>,
     c: &FBig<HalfEven>,
 ) -> Option<(FBig<HalfEven>, FBig<HalfEven>)> {
-    let zero = ib_to_bf_prec(IBig::ZERO);
-    let two = ib_to_bf_prec(IBig::from(2));
-    let four = ib_to_bf_prec(IBig::from(4));
+    let zero = prec.ib(IBig::ZERO);
+    let two = prec.ib(IBig::from(2));
+    let four = prec.ib(IBig::from(4));
 
     // Handle degenerate and easy cases
     if a == &zero {

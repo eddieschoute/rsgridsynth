@@ -13,11 +13,12 @@
 //! evaluation) that a later stage will use to actually build those protocols. It does not
 //! itself implement the mixed-diagonal or mixed-fallback region/synthesis logic.
 
-use crate::common::{fb_with_prec, ib_to_bf_prec};
+use crate::common::Prec;
 use dashu_float::round::mode::HalfEven;
 use dashu_float::FBig;
 use dashu_int::ops::Abs;
 use dashu_int::IBig;
+use num_traits::Zero;
 
 // `WFrame` and `diagonal_diamond_distance` live in `crate::accuracy` now (shared by both this
 // protocol module and the plain single-candidate synthesis path in `crate::gridsynth`), but
@@ -72,13 +73,14 @@ pub struct MixtureWeight {
 /// zero anyway -- a genuinely degenerate, ill-posed pair that callers should not construct
 /// (rather than returning a bogus/NaN-equivalent `p`).
 pub fn mixture_weight(
+    prec: Prec,
     w_lo: (&FBig<HalfEven>, &FBig<HalfEven>),
     w_hi: (&FBig<HalfEven>, &FBig<HalfEven>),
 ) -> Option<MixtureWeight> {
     let (re_lo, im_lo) = w_lo;
     let (re_hi, im_hi) = w_hi;
 
-    let zero = ib_to_bf_prec(IBig::ZERO);
+    let zero = prec.ib(IBig::ZERO);
     debug_assert!(
         im_lo <= &zero,
         "mixture_weight precondition violated: Im(w_lo) must be <= 0 (w_lo must be the \
@@ -92,38 +94,38 @@ pub fn mixture_weight(
 
     // Degenerate case: one branch is already an exact solution (zero rotation error), so
     // mixing is unnecessary and the closed form below would divide 0/0.
-    if im_lo.repr().is_zero() {
+    if im_lo.is_zero() {
         return Some(MixtureWeight {
-            p: ib_to_bf_prec(IBig::ONE),
+            p: prec.ib(IBig::ONE),
             projective_diamond_error: zero,
         });
     }
-    if im_hi.repr().is_zero() {
+    if im_hi.is_zero() {
         return Some(MixtureWeight {
             p: zero.clone(),
             projective_diamond_error: zero,
         });
     }
 
-    let hi_cross = fb_with_prec(re_hi * im_hi);
-    let lo_cross = fb_with_prec(re_lo * im_lo);
-    let denom = fb_with_prec(&hi_cross - &lo_cross);
-    if denom.repr().is_zero() {
+    let hi_cross = re_hi * im_hi;
+    let lo_cross = re_lo * im_lo;
+    let denom = &hi_cross - &lo_cross;
+    if denom.is_zero() {
         // Neither branch is exact, yet the closed form is 0/0: a genuinely degenerate,
         // ill-posed pair. Refuse to guess rather than divide by zero.
         return None;
     }
-    let p = fb_with_prec(&hi_cross / &denom);
+    let p = &hi_cross / &denom;
 
-    let one = ib_to_bf_prec(IBig::ONE);
-    let one_minus_p = fb_with_prec(&one - &p);
-    let im_lo_sq = fb_with_prec(im_lo * im_lo);
-    let im_hi_sq = fb_with_prec(im_hi * im_hi);
-    let lo_term = fb_with_prec(&p * &im_lo_sq);
-    let hi_term = fb_with_prec(&one_minus_p * &im_hi_sq);
-    let sum_terms = fb_with_prec(&lo_term + &hi_term);
-    let two = fb_with_prec(FBig::try_from(2.0).unwrap());
-    let projective_diamond_error = fb_with_prec(&two * &sum_terms);
+    let one = prec.ib(IBig::ONE);
+    let one_minus_p = &one - &p;
+    let im_lo_sq = im_lo * im_lo;
+    let im_hi_sq = im_hi * im_hi;
+    let lo_term = &p * &im_lo_sq;
+    let hi_term = &one_minus_p * &im_hi_sq;
+    let sum_terms = &lo_term + &hi_term;
+    let two = prec.fb(FBig::try_from(2.0).unwrap());
+    let projective_diamond_error = &two * &sum_terms;
 
     Some(MixtureWeight {
         p,
@@ -134,11 +136,15 @@ pub fn mixture_weight(
 /// General Pauli-channel diamond-norm closed form: `||E1 - E2||_diamond = sum_P |q_P -
 /// r_P|` over the four Pauli components `(I, X, Y, Z)`. Kept generic/simple for a future
 /// stage's mixed-diagonal Pauli-channel error computation.
-pub fn pauli_diamond_distance(a: &[FBig<HalfEven>; 4], b: &[FBig<HalfEven>; 4]) -> FBig<HalfEven> {
-    let mut sum = ib_to_bf_prec(IBig::ZERO);
+pub fn pauli_diamond_distance(
+    prec: Prec,
+    a: &[FBig<HalfEven>; 4],
+    b: &[FBig<HalfEven>; 4],
+) -> FBig<HalfEven> {
+    let mut sum = prec.ib(IBig::ZERO);
     for (x, y) in a.iter().zip(b.iter()) {
-        let diff = fb_with_prec(x - y);
-        sum = fb_with_prec(&sum + diff.abs());
+        let diff = x - y;
+        sum = &sum + diff.abs();
     }
     sum
 }
@@ -154,39 +160,32 @@ pub fn pauli_diamond_distance(a: &[FBig<HalfEven>; 4], b: &[FBig<HalfEven>; 4]) 
 /// must derive its working precision from the *tighter* of the requested diamond epsilon
 /// and any per-branch spec epsilon it computes downstream -- that budgeting is out of scope
 /// here.
-pub fn diamond_to_spec_epsilon(eps_diamond: &FBig<HalfEven>) -> FBig<HalfEven> {
-    let two = fb_with_prec(FBig::try_from(2.0).unwrap());
-    fb_with_prec(eps_diamond / &two)
+pub fn diamond_to_spec_epsilon(prec: Prec, eps_diamond: &FBig<HalfEven>) -> FBig<HalfEven> {
+    let two = prec.fb(FBig::try_from(2.0).unwrap());
+    eps_diamond / &two
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::{cos_fbig, reset_prec_bits, sin_fbig};
     use crate::gridsynth::EpsilonRegion;
-    use crate::math::sqrt_fbig;
     use crate::ring::{DOmega, ZOmega, ZRootTwo};
     use crate::tdgp::Region;
-    use serial_test::serial;
 
-    // NOTE: `crate::common::PREC_BITS` is a single process-global atomic (see
-    // `src/common.rs`). Some tests elsewhere in this crate (e.g. anything that calls
-    // `config_from_theta_epsilon`) permanently change it and never restore the default.
-    // Every test below that does FBig arithmetic at meaningful precision therefore starts
-    // by calling `reset_prec_bits()` to pin a known precision regardless of what leaked in
-    // from a previously-run test, and is marked `#[serial]` to match this crate's
-    // convention (see `tests/integration_test.rs`) for tests sensitive to that global state.
+    // Precision is explicit, not ambient: each test below builds its own `Prec` value, so
+    // there is no shared state to race on and no need to serialize these tests.
+    const PREC: Prec = Prec(1000);
 
     fn to_fbig(x: f64) -> FBig<HalfEven> {
         FBig::<HalfEven>::try_from(x)
             .unwrap()
-            .with_precision(crate::common::get_prec_bits())
+            .with_precision(PREC.bits())
             .value()
     }
 
     fn approx_eq(a: &FBig<HalfEven>, b: &FBig<HalfEven>, tol_bits: usize) -> bool {
         let diff = (a - b).abs();
-        let tol = ib_to_bf_prec(IBig::ONE) / ib_to_bf_prec(IBig::ONE << tol_bits);
+        let tol = PREC.ib(IBig::ONE) / PREC.ib(IBig::ONE << tol_bits);
         diff <= tol
     }
 
@@ -212,19 +211,15 @@ mod tests {
     // B1 mandatory sanity check: w = u * e^{i theta/2} is a unit-modulus phase rotation of
     // u, so it must preserve the modulus exactly: Re(w)^2 + Im(w)^2 == Re(u)^2 + Im(u)^2.
     #[test]
-    #[serial]
     fn wframe_preserves_modulus() {
-        reset_prec_bits();
         for theta_f64 in [0.0_f64, 0.3, 1.0, std::f64::consts::PI / 2.0, -2.1, 5.9] {
             let theta = to_fbig(theta_f64);
-            let frame = WFrame::new(&theta);
+            let frame = WFrame::new(PREC, &theta);
             for u in sample_domegas() {
                 let re_w = frame.re_w(&u);
                 let im_w = frame.im_w(&u);
-                let lhs = fb_with_prec(fb_with_prec(&re_w * &re_w) + fb_with_prec(&im_w * &im_w));
-                let rhs = fb_with_prec(
-                    fb_with_prec(u.real() * u.real()) + fb_with_prec(u.imag() * u.imag()),
-                );
+                let lhs = (&re_w * &re_w) + (&im_w * &im_w);
+                let rhs = (u.real(PREC) * u.real(PREC)) + (u.imag(PREC) * u.imag(PREC));
                 assert!(
                     approx_eq(&lhs, &rhs, 200),
                     "modulus not preserved for theta={theta_f64}: |w|^2={lhs}, |u|^2={rhs}"
@@ -239,22 +234,20 @@ mod tests {
     // `cos_similarity >= d`. We recompute `d` with the same formula as
     // `EpsilonRegion::new` and confirm `WFrame::re_w(u) >= d` agrees with `inside(u)`.
     #[test]
-    #[serial]
     fn wframe_re_w_matches_epsilon_region_cos_similarity() {
-        reset_prec_bits();
         let theta = to_fbig(0.7);
         let epsilon = to_fbig(0.5);
         let scale = ZRootTwo::from_int(IBig::from(1_000_000));
 
-        let region = EpsilonRegion::new(theta.clone(), epsilon.clone(), scale.clone());
-        let frame = WFrame::new(&theta);
+        let region = EpsilonRegion::new(PREC, theta.clone(), epsilon.clone(), scale.clone());
+        let frame = WFrame::new(PREC, &theta);
 
-        let one = ib_to_bf_prec(IBig::ONE);
+        let one = PREC.ib(IBig::ONE);
         let four = to_fbig(4.0);
-        let eps_sq = fb_with_prec(&epsilon * &epsilon);
-        let half_eps_sq = fb_with_prec(&eps_sq / &four);
-        let one_minus_half_eps_sq = fb_with_prec(&one - &half_eps_sq);
-        let d = fb_with_prec(sqrt_fbig(&one_minus_half_eps_sq) * sqrt_fbig(&scale.to_real()));
+        let eps_sq = &epsilon * &epsilon;
+        let half_eps_sq = &eps_sq / &four;
+        let one_minus_half_eps_sq = &one - &half_eps_sq;
+        let d = PREC.fb(one_minus_half_eps_sq.sqrt() * scale.to_real(PREC).sqrt());
 
         for u in sample_domegas() {
             let re_w = frame.re_w(&u);
@@ -263,46 +256,40 @@ mod tests {
                 region.inside(&u),
                 expected_inside,
                 "WFrame::re_w disagreed with EpsilonRegion::inside for u=({}, {})",
-                u.real(),
-                u.imag()
+                u.real(PREC),
+                u.imag(PREC)
             );
         }
     }
 
     #[test]
-    #[serial]
     fn mixture_weight_degenerate_lo_exact() {
-        reset_prec_bits();
         let re_lo = to_fbig(1.0);
         let im_lo = to_fbig(0.0);
         let re_hi = to_fbig(0.98);
         let im_hi = to_fbig(0.02);
 
-        let result = mixture_weight((&re_lo, &im_lo), (&re_hi, &im_hi))
+        let result = mixture_weight(PREC, (&re_lo, &im_lo), (&re_hi, &im_hi))
             .expect("degenerate exact case must not return None");
-        assert_eq!(result.p, ib_to_bf_prec(IBig::ONE));
-        assert_eq!(result.projective_diamond_error, ib_to_bf_prec(IBig::ZERO));
+        assert_eq!(result.p, PREC.ib(IBig::ONE));
+        assert_eq!(result.projective_diamond_error, PREC.ib(IBig::ZERO));
     }
 
     #[test]
-    #[serial]
     fn mixture_weight_degenerate_hi_exact() {
-        reset_prec_bits();
         let re_lo = to_fbig(0.98);
         let im_lo = to_fbig(-0.02);
         let re_hi = to_fbig(1.0);
         let im_hi = to_fbig(0.0);
 
-        let result = mixture_weight((&re_lo, &im_lo), (&re_hi, &im_hi))
+        let result = mixture_weight(PREC, (&re_lo, &im_lo), (&re_hi, &im_hi))
             .expect("degenerate exact case must not return None");
-        assert_eq!(result.p, ib_to_bf_prec(IBig::ZERO));
-        assert_eq!(result.projective_diamond_error, ib_to_bf_prec(IBig::ZERO));
+        assert_eq!(result.p, PREC.ib(IBig::ZERO));
+        assert_eq!(result.projective_diamond_error, PREC.ib(IBig::ZERO));
     }
 
     #[test]
-    #[serial]
     fn mixture_weight_zero_denominator_returns_none() {
-        reset_prec_bits();
         // Neither branch is exact (both Im(w) nonzero), but Re(w_hi)*Im(w_hi) ==
         // Re(w_lo)*Im(w_lo), so the closed form's denominator is exactly zero.
         let re_lo = to_fbig(2.0);
@@ -310,7 +297,7 @@ mod tests {
         let re_hi = to_fbig(-2.0);
         let im_hi = to_fbig(1.0);
 
-        assert!(mixture_weight((&re_lo, &im_lo), (&re_hi, &im_hi)).is_none());
+        assert!(mixture_weight(PREC, (&re_lo, &im_lo), (&re_hi, &im_hi)).is_none());
     }
 
     // Convention-agnostic sanity check for the generic (non-degenerate) case, using plain
@@ -327,25 +314,23 @@ mod tests {
     // 2*|Im(w)|` into a quadratic-order residual `~= 2*Im(w)^2`, which is what we check
     // here using this module's own `diagonal_diamond_distance`.
     #[test]
-    #[serial]
     fn mixture_weight_beats_each_branchs_own_unmixed_diamond_error() {
-        reset_prec_bits();
         let re_lo = to_fbig(0.9999);
         let im_lo = to_fbig(-0.01);
         let re_hi = to_fbig(0.9999);
         let im_hi = to_fbig(0.02);
 
-        let result = mixture_weight((&re_lo, &im_lo), (&re_hi, &im_hi))
+        let result = mixture_weight(PREC, (&re_lo, &im_lo), (&re_hi, &im_hi))
             .expect("generic straddling pair must produce a mixture");
 
         assert!(
-            result.p >= ib_to_bf_prec(IBig::ZERO) && result.p <= ib_to_bf_prec(IBig::ONE),
+            result.p >= PREC.ib(IBig::ZERO) && result.p <= PREC.ib(IBig::ONE),
             "p={} is not a valid probability",
             result.p
         );
 
-        let unmixed_lo = diagonal_diamond_distance(&re_lo);
-        let unmixed_hi = diagonal_diamond_distance(&re_hi);
+        let unmixed_lo = diagonal_diamond_distance(PREC, &re_lo);
+        let unmixed_hi = diagonal_diamond_distance(PREC, &re_hi);
         assert!(
             result.projective_diamond_error < unmixed_lo,
             "mixed error {} should be less than the lo branch's own unmixed diamond error {}",
@@ -361,23 +346,19 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn diagonal_diamond_distance_zero_at_perfect_match() {
-        reset_prec_bits();
-        let re_w = ib_to_bf_prec(IBig::ONE);
-        let dist = diagonal_diamond_distance(&re_w);
-        assert!(approx_eq(&dist, &ib_to_bf_prec(IBig::ZERO), 200));
+        let re_w = PREC.ib(IBig::ONE);
+        let dist = diagonal_diamond_distance(PREC, &re_w);
+        assert!(approx_eq(&dist, &PREC.ib(IBig::ZERO), 200));
     }
 
     #[test]
-    #[serial]
     fn diagonal_diamond_distance_matches_closed_form() {
-        reset_prec_bits();
         // Re(w) = cos(delta) for delta = 0.05: distance should be 2*sin(0.05).
         let delta = to_fbig(0.05);
-        let re_w = fb_with_prec(cos_fbig(&delta));
-        let expected = fb_with_prec(to_fbig(2.0) * fb_with_prec(sin_fbig(&delta)));
-        let dist = diagonal_diamond_distance(&re_w);
+        let re_w = delta.cos();
+        let expected = to_fbig(2.0) * (delta.sin());
+        let dist = diagonal_diamond_distance(PREC, &re_w);
         assert!(
             approx_eq(&dist, &expected, 200),
             "dist={dist}, expected={expected}"
@@ -385,30 +366,24 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn pauli_diamond_distance_sums_absolute_differences() {
-        reset_prec_bits();
         let a = [to_fbig(1.0), to_fbig(0.0), to_fbig(0.0), to_fbig(0.0)];
         let b = [to_fbig(0.0), to_fbig(1.0), to_fbig(0.0), to_fbig(0.0)];
-        let dist = pauli_diamond_distance(&a, &b);
+        let dist = pauli_diamond_distance(PREC, &a, &b);
         assert!(approx_eq(&dist, &to_fbig(2.0), 200));
     }
 
     #[test]
-    #[serial]
     fn pauli_diamond_distance_zero_for_equal_vectors() {
-        reset_prec_bits();
         let a = [to_fbig(0.3), to_fbig(-0.1), to_fbig(0.2), to_fbig(0.4)];
-        let dist = pauli_diamond_distance(&a, &a.clone());
-        assert!(approx_eq(&dist, &ib_to_bf_prec(IBig::ZERO), 200));
+        let dist = pauli_diamond_distance(PREC, &a, &a.clone());
+        assert!(approx_eq(&dist, &PREC.ib(IBig::ZERO), 200));
     }
 
     #[test]
-    #[serial]
     fn diamond_to_spec_epsilon_halves() {
-        reset_prec_bits();
         let eps_diamond = to_fbig(0.02);
-        let eps_spec = diamond_to_spec_epsilon(&eps_diamond);
+        let eps_spec = diamond_to_spec_epsilon(PREC, &eps_diamond);
         assert!(approx_eq(&eps_spec, &to_fbig(0.01), 200));
     }
 }

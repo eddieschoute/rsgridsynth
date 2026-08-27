@@ -28,10 +28,10 @@ num-traits = "0.2"
 rand = "0.9"
 clap = { optional = true, version = "4.6.4", features = ["derive"] }
 num = "0.4"
-dashu = "0.4.2"
-dashu-int = "0.4.1"
-dashu-float = { version = "0.4.3", features = ["num-traits_v02"]}
-dashu-base = "0.4.1"
+dashu = "0.6"
+dashu-int = "0.6"
+dashu-float = { version = "0.6", features = ["num-traits_v02"]}
+dashu-base = "0.6"
 log = "0.4"
 env_logger = "0.11"
 

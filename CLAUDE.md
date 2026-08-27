@@ -68,9 +68,10 @@ The crate implements one pipeline: angle+tolerance in → exact Clifford+T gate 
 (`gate::GateSeq`) out. Each stage lives in its own module and is called, in order, from
 `gridsynth::gridsynth_gates`:
 
-1. **`config.rs`** — `GridSynthConfig`/`GridSynthConfig::with_compute_error` hold theta, epsilon, RNG,
-   and timeouts. `config_from_theta_epsilon` is the library entry point for embedding; it also resets
-   the global precision (see below) so repeated calls in one process don't inherit stale precision.
+1. **`config.rs`** — `GridSynthConfig` holds theta, epsilon, RNG, working precision (`prec: Prec`,
+   see below), timeouts, and the per-call `diophantine::Caches`. `config_from_theta_epsilon` is the
+   library entry point for embedding; it builds a fresh `Prec` and `Caches` for that call, so
+   concurrent calls never share state and output depends only on `(theta, epsilon, seed)`.
 2. **`gridsynth.rs`** — orchestrates the search. Builds an `EpsilonRegion` (the target-angle wedge) and
    a `UnitDisk`, calls `to_upright::to_upright_set_pair` once to get a `GridOp` transform, then loops
    over increasing denominator exponent `k`, calling `tdgp::solve_tdgp` for lattice-point candidates and
@@ -88,8 +89,9 @@ The crate implements one pipeline: angle+tolerance in → exact Clifford+T gate 
    rescale recursively (this is the performance-critical inner loop).
 6. **`diophantine.rs`** — for a candidate `z`, solves the norm equation for a companion `w` such that
    `(z, w)` forms a unitary (via factoring + primality testing, each with its own timeout from
-   `GridSynthConfig`). Caches (`PRIMALITY_CACHE`, `SQRT_CACHE`) are process-global; `clear_caches()`
-   (re-exported at the crate root) resets them and is called between test cases.
+   `GridSynthConfig`). The primality/sqrt/factor/diophantine memo caches (`diophantine::Caches`) are
+   caller-owned, living on `GridSynthConfig::diophantine_data`, not process-global — each call to
+   `config_from_theta_epsilon` gets its own, so concurrent syntheses never share them.
 7. **`unitary.rs`** — `DOmegaUnitary { z, w, n }` represents the exact synthesized matrix
    `[[z, -w̄ωⁿ], [w, z̄ωⁿ]]` up to the denominator exponent shared by `z`/`w`. Gate application is done
    algebraically via `mul_by_{t,s,h,x,w}_from_left`, not by materializing matrices.
@@ -125,12 +127,18 @@ the string, for backward compatibility with pre-`GateSeq` output).
 
 ### Precision (`common.rs`)
 
-`PREC_BITS` is a single process-global `AtomicUsize` controlling the working precision of every
-`dashu_float::FBig<HalfEven>` computation in the crate (via `ib_to_bf_prec`/`fb_with_prec`). It is not
-thread-local. `main.rs` and `config_from_theta_epsilon` set/reset it per run; calling lower-level
-functions directly without going through one of those entry points will silently reuse whatever
-precision the previous call left behind. This is also why `tests/integration_test.rs` marks every test
-`#[serial]` — parallel test threads would race on `PREC_BITS`.
+Working precision is **explicit, not ambient** — there is no global or thread-local precision
+anywhere in the crate. `Prec(pub usize)` is a `Copy` newtype threaded through every computation:
+either as a field on the per-synthesis structs that already exist (`GridSynthConfig`, `Ellipse`,
+`Interval`, `EpsilonRegion`/`UnitDisk`, the `protocol::*` regions/results, `WFrame`), or as a
+parameter on the leaf helpers (`math.rs`, `ring::*` float projections, `odgp.rs`/`tdgp.rs`).
+`Prec::ib` (`IBig` → `FBig`) is the load-bearing coercion — `FBig::from(IBig)` is precision-0,
+which `dashu_float` defines as unlimited — while `Prec::fb` (re-pinning an existing `FBig`) is
+needed only at genuine precision boundaries, since dashu propagates precision as `max(lhs, rhs)`
+through arithmetic. Because nothing is shared across calls or threads, concurrent syntheses are
+independent by construction and output is a deterministic function of `(theta, epsilon, seed)`;
+`tests/concurrency_test.rs` asserts this directly, and no test in the crate needs `#[serial]` for
+precision reasons anymore.
 
 ### CLI vs library
 

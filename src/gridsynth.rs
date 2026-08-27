@@ -1,12 +1,11 @@
 // Copyright (c) 2024-2025 Shun Yamamoto and Nobuyuki Yoshioka, and IBM
 // Licensed under the MIT License. See LICENSE file in the project root for full license information.
 
-use crate::common::{cos_fbig, fb_with_prec, get_prec_bits, ib_to_bf_prec, sin_fbig};
+use crate::common::Prec;
 use crate::config::{GridSynthConfig, GridSynthResult};
 use crate::diophantine::diophantine_dyadic;
 use crate::grid_op::GridOp;
 use crate::math::solve_quadratic;
-use crate::math::sqrt_fbig;
 use crate::region::{Ellipse, Rectangle};
 use crate::ring::{DOmega, DRootTwo, ZOmega, ZRootTwo};
 use crate::synthesis_of_clifford_t::decompose_domega_unitary;
@@ -26,14 +25,15 @@ use std::cmp::Ordering;
 use std::time::{Duration, Instant};
 
 fn matrix_multiply_2x2(
+    prec: Prec,
     a: &Matrix2<FBig<HalfEven>>,
     b: &Matrix2<FBig<HalfEven>>,
 ) -> Matrix2<FBig<HalfEven>> {
-    let mut result = Matrix2::from_element(ib_to_bf_prec(IBig::ZERO));
+    let mut result = Matrix2::from_element(prec.ib(IBig::ZERO));
 
     for i in 0..2 {
         for j in 0..2 {
-            let mut sum = ib_to_bf_prec(IBig::ZERO);
+            let mut sum = prec.ib(IBig::ZERO);
             for k in 0..2 {
                 sum += &a[(i, k)] * &b[(k, j)];
             }
@@ -81,16 +81,22 @@ pub struct EpsilonRegion {
     z_x: FBig<HalfEven>,
     z_y: FBig<HalfEven>,
     ellipse: Ellipse,
+    prec: Prec,
 }
 
 impl EpsilonRegion {
-    pub fn new(theta: FBig<HalfEven>, epsilon: FBig<HalfEven>, scale: ZRootTwo) -> Self {
-        let two = fb_with_prec(FBig::try_from(2.0).unwrap());
-        let theta_half = fb_with_prec(&theta / &two);
-        let neg_theta_half = -fb_with_prec(theta_half);
-        let z_x: FBig<HalfEven> = fb_with_prec(cos_fbig(&neg_theta_half));
-        let z_y: FBig<HalfEven> = fb_with_prec(sin_fbig(&neg_theta_half));
-        Self::from_target_direction_impl(z_x, z_y, epsilon, scale, theta)
+    pub fn new(
+        prec: Prec,
+        theta: FBig<HalfEven>,
+        epsilon: FBig<HalfEven>,
+        scale: ZRootTwo,
+    ) -> Self {
+        let two = prec.fb(FBig::try_from(2.0).unwrap());
+        let theta_half = prec.fb(&theta / &two);
+        let neg_theta_half = -prec.fb(theta_half);
+        let z_x: FBig<HalfEven> = prec.fb(neg_theta_half.cos());
+        let z_y: FBig<HalfEven> = prec.fb(neg_theta_half.sin());
+        Self::from_target_direction_impl(prec, z_x, z_y, epsilon, scale, theta)
     }
 
     /// Builds the same region as [`EpsilonRegion::new`], but from the target direction's
@@ -105,6 +111,7 @@ impl EpsilonRegion {
     /// second `cos_fbig`/`sin_fbig` evaluation. `(z_x, z_y)` must satisfy `z_x^2 + z_y^2 == 1`
     /// (a unit vector); this is not checked.
     pub fn from_target_direction(
+        prec: Prec,
         z_x: FBig<HalfEven>,
         z_y: FBig<HalfEven>,
         epsilon: FBig<HalfEven>,
@@ -112,51 +119,52 @@ impl EpsilonRegion {
     ) -> Self {
         // No real `theta` is available here; the `_theta`/`_epsilon` fields are stored only for
         // `Debug` output and are never read by any `Region` method, so a placeholder is fine.
-        let placeholder_theta: FBig<HalfEven> = ib_to_bf_prec(IBig::ZERO);
-        Self::from_target_direction_impl(z_x, z_y, epsilon, scale, placeholder_theta)
+        let placeholder_theta: FBig<HalfEven> = prec.ib(IBig::ZERO);
+        Self::from_target_direction_impl(prec, z_x, z_y, epsilon, scale, placeholder_theta)
     }
 
     fn from_target_direction_impl(
+        prec: Prec,
         z_x: FBig<HalfEven>,
         z_y: FBig<HalfEven>,
         epsilon: FBig<HalfEven>,
         scale: ZRootTwo,
         theta_for_debug: FBig<HalfEven>,
     ) -> Self {
-        let one = fb_with_prec(FBig::try_from(1.0).unwrap());
-        let four = fb_with_prec(FBig::try_from(4.0).unwrap());
-        let epsilon_squared = fb_with_prec(&epsilon * &epsilon);
-        let half_eps_sq = fb_with_prec(&epsilon_squared / &four);
+        let one = prec.fb(FBig::try_from(1.0).unwrap());
+        let four = prec.fb(FBig::try_from(4.0).unwrap());
+        let epsilon_squared = &epsilon * &epsilon;
+        let half_eps_sq = &epsilon_squared / &four;
         // `epsilon` >= 2 (or a derived epsilon that overshoots it, e.g. the fallback
         // protocol's rescaled correction-step epsilon on a near-degenerate candidate) is
         // already past the point where any point of the disk fails to qualify: the sane
         // mathematical limit of the formula below is `d = 0` (no angular restriction at
         // all), not a negative radicand. Clamp rather than let a tiny-precision rounding
         // artifact (or a legitimately oversized derived epsilon) panic in `sqrt_fbig`.
-        let one_minus_half_eps_sq = (one - half_eps_sq).max(ib_to_bf_prec(IBig::ZERO));
-        let scale_to_real = scale.to_real();
-        let d = fb_with_prec(sqrt_fbig(&one_minus_half_eps_sq) * sqrt_fbig(&scale_to_real));
+        let one_minus_half_eps_sq = (one - half_eps_sq).max(prec.ib(IBig::ZERO));
+        let scale_to_real = scale.to_real(prec);
+        let d = one_minus_half_eps_sq.sqrt() * scale_to_real.sqrt();
 
-        let neg_z_y: FBig<HalfEven> = -fb_with_prec(z_y.clone());
-        let zero: FBig<HalfEven> = ib_to_bf_prec(IBig::ZERO);
-        let epsilon_neg4: FBig<HalfEven> = fb_with_prec(epsilon.clone().powi(IBig::from(-4)));
-        let epsilon_neg2: FBig<HalfEven> = fb_with_prec(epsilon.clone().powi(IBig::from(-2)));
+        let neg_z_y: FBig<HalfEven> = -(z_y.clone());
+        let zero: FBig<HalfEven> = prec.ib(IBig::ZERO);
+        let epsilon_neg4: FBig<HalfEven> = epsilon.clone().powi(IBig::from(-4));
+        let epsilon_neg2: FBig<HalfEven> = epsilon.clone().powi(IBig::from(-2));
         let d1: Matrix2<FBig<HalfEven>> =
             Matrix2::new(z_x.clone(), neg_z_y.clone(), z_y.clone(), z_x.clone());
         let d2: Matrix2<FBig<HalfEven>> = Matrix2::new(
-            fb_with_prec(64 * epsilon_neg4 / &scale_to_real),
+            64 * epsilon_neg4 / &scale_to_real,
             zero.clone(),
             zero.clone(),
-            fb_with_prec(4 * epsilon_neg2 / &scale_to_real),
+            4 * epsilon_neg2 / &scale_to_real,
         );
         let d3: Matrix2<FBig<HalfEven>> =
             Matrix2::new(z_x.clone(), z_y.clone(), neg_z_y, z_x.clone());
-        let px = fb_with_prec(&d * &z_x);
-        let py = fb_with_prec(&d * &z_y);
+        let px = &d * &z_x;
+        let py = &d * &z_y;
         let p = Vector2::new(px, py);
-        let m1: Matrix2<FBig<HalfEven>> = matrix_multiply_2x2(&d1, &d2);
-        let m: Matrix2<FBig<HalfEven>> = matrix_multiply_2x2(&m1, &d3);
-        let ellipse = Ellipse::new(m, p);
+        let m1: Matrix2<FBig<HalfEven>> = matrix_multiply_2x2(prec, &d1, &d2);
+        let m: Matrix2<FBig<HalfEven>> = matrix_multiply_2x2(prec, &m1, &d3);
+        let ellipse = Ellipse::new(m, p, prec);
         Self {
             _theta: theta_for_debug,
             _epsilon: epsilon,
@@ -165,6 +173,7 @@ impl EpsilonRegion {
             z_x,
             z_y,
             ellipse,
+            prec,
         }
     }
 }
@@ -178,35 +187,37 @@ impl Region for EpsilonRegion {
     // The radius is 1 in the figure.
     // For "up to phase" it is scaled by |δ|^2 = 2 + √2.
     fn inside(&self, u: &DOmega) -> bool {
-        let cos_term1 = fb_with_prec(&self.z_x * u.real());
-        let cos_term2 = fb_with_prec(&self.z_y * u.imag());
-        let cos_similarity = fb_with_prec(&cos_term1 + &cos_term2);
+        let prec = self.prec;
+        let cos_term1 = &self.z_x * u.real(prec);
+        let cos_term2 = &self.z_y * u.imag(prec);
+        let cos_similarity = &cos_term1 + &cos_term2;
 
         DRootTwo::from_domega(u.conj() * u) <= DRootTwo::from_zroottwo(self.scale.clone())
             && cos_similarity >= self.d
     }
 
     fn intersect(&self, u0: &DOmega, v: &DOmega) -> Option<(FBig<HalfEven>, FBig<HalfEven>)> {
+        let prec = self.prec;
         let a = v.conj() * v;
         let b = 2 * (v.conj() * u0);
         let c = u0.conj() * u0 - DOmega::from_zroottwo(&self.scale);
-        let vz_term1 = fb_with_prec(&self.z_x * v.real());
-        let vz_term2 = fb_with_prec(&self.z_y * v.imag());
-        let vz = fb_with_prec(&vz_term1 + &vz_term2);
+        let vz_term1 = &self.z_x * v.real(prec);
+        let vz_term2 = &self.z_y * v.imag(prec);
+        let vz = &vz_term1 + &vz_term2;
 
-        let term1 = fb_with_prec(&self.z_x * u0.real());
-        let term2 = fb_with_prec(&self.z_y * u0.imag());
-        let temp_sub = fb_with_prec(&self.d - &term1);
-        let rhs = fb_with_prec(&temp_sub - &term2);
+        let term1 = &self.z_x * u0.real(prec);
+        let term2 = &self.z_y * u0.imag(prec);
+        let temp_sub = &self.d - &term1;
+        let rhs = &temp_sub - &term2;
         // t0 <= t1
-        let (t0, t1) = solve_quadratic(a.real(), b.real(), c.real())?;
-        let zero = fb_with_prec(ib_to_bf_prec(IBig::ZERO));
+        let (t0, t1) = solve_quadratic(prec, a.real(prec), b.real(prec), c.real(prec))?;
+        let zero = prec.ib(IBig::ZERO);
 
         if vz > zero {
-            let t2 = fb_with_prec(&rhs / &vz);
+            let t2 = &rhs / &vz;
             Some(if t0 > t2 { (t0, t1) } else { (t2, t1) })
         } else if vz < zero {
-            let t2 = fb_with_prec(&rhs / &vz);
+            let t2 = &rhs / &vz;
             Some(if t1 < t2 { (t0, t1) } else { (t0, t2) })
         } else if rhs <= zero {
             Some((t0, t1))
@@ -220,20 +231,26 @@ impl Region for EpsilonRegion {
 pub struct UnitDisk {
     scale: ZRootTwo,
     ellipse: Ellipse,
+    prec: Prec,
 }
 
 impl UnitDisk {
-    pub fn new(scale: ZRootTwo) -> Self {
-        let s_inv: FBig<HalfEven> = 1 / scale.to_real();
+    pub fn new(prec: Prec, scale: ZRootTwo) -> Self {
+        let s_inv: FBig<HalfEven> = 1 / scale.to_real(prec);
         let ellipse = Ellipse::from(
             s_inv.clone(),
-            ib_to_bf_prec(IBig::ZERO),
-            ib_to_bf_prec(IBig::ZERO),
+            prec.ib(IBig::ZERO),
+            prec.ib(IBig::ZERO),
             s_inv.clone(),
-            ib_to_bf_prec(IBig::ZERO),
-            ib_to_bf_prec(IBig::ZERO),
+            prec.ib(IBig::ZERO),
+            prec.ib(IBig::ZERO),
+            prec,
         );
-        Self { scale, ellipse }
+        Self {
+            scale,
+            ellipse,
+            prec,
+        }
     }
 
     pub fn ellipse(&self) -> &Ellipse {
@@ -250,10 +267,11 @@ impl Region for UnitDisk {
     }
 
     fn intersect(&self, u0: &DOmega, v: &DOmega) -> Option<(FBig<HalfEven>, FBig<HalfEven>)> {
+        let prec = self.prec;
         let a = v.conj() * v;
         let b = 2 * (v.conj() * u0);
         let c = u0.conj() * u0 - DOmega::from_zroottwo(&self.scale);
-        solve_quadratic(a.real(), b.real(), c.real())
+        solve_quadratic(prec, a.real(prec), b.real(prec), c.real(prec))
     }
 }
 
@@ -401,6 +419,7 @@ where
 /// `gridsynth`; `setup_regions_and_transform` and `search_for_solution` below are generic
 /// over the first region so a future sibling `Region` implementation can reuse them.
 pub(crate) fn epsilon_region_and_unit_disk(
+    prec: Prec,
     theta: FBig<HalfEven>,
     epsilon: FBig<HalfEven>,
     phase: PhaseMode,
@@ -427,8 +446,8 @@ pub(crate) fn epsilon_region_and_unit_disk(
         },
     };
 
-    let epsilon_region = EpsilonRegion::new(theta, epsilon, epsilon_region_scale);
-    let unit_disk = UnitDisk::new(unit_disk_scale);
+    let epsilon_region = EpsilonRegion::new(prec, theta, epsilon, epsilon_region_scale);
+    let unit_disk = UnitDisk::new(prec, unit_disk_scale);
     (epsilon_region, unit_disk)
 }
 
@@ -481,7 +500,7 @@ pub(crate) fn search_for_solution<A: Region + std::fmt::Debug>(
     // (theta, epsilon, region) input -- it exists only to fail loudly, in finite time,
     // if a `Region` predicate is ever incorrect (in which case no solution may exist and
     // the loop below would otherwise spin forever).
-    let max_k = 4 * get_prec_bits() as i64;
+    let max_k = 4 * config.prec.bits() as i64;
 
     let mut k = 0;
     let mut time_of_solve_tdgp = Duration::ZERO;
@@ -552,8 +571,12 @@ pub(crate) fn search_for_solution<A: Region + std::fmt::Debug>(
 /// solution -- see [`search_for_solution`] for why that can only happen if a `Region`
 /// predicate is broken.
 pub(crate) fn gridsynth(config: &mut GridSynthConfig, phase: PhaseMode) -> Option<DOmegaUnitary> {
-    let (epsilon_region, unit_disk) =
-        epsilon_region_and_unit_disk(config.theta.clone(), config.epsilon.clone(), phase);
+    let (epsilon_region, unit_disk) = epsilon_region_and_unit_disk(
+        config.prec,
+        config.theta.clone(),
+        config.epsilon.clone(),
+        phase,
+    );
     let transformed = setup_regions_and_transform(
         &epsilon_region,
         &unit_disk,
@@ -608,6 +631,7 @@ pub fn gridsynth_gates(config: &mut GridSynthConfig) -> GridSynthResult {
         GridSynthResult {
             gates,
             global_phase: false,
+            prec: config.prec,
         }
     } else {
         // exact synthesis
@@ -624,11 +648,13 @@ pub fn gridsynth_gates(config: &mut GridSynthConfig) -> GridSynthResult {
             GridSynthResult {
                 gates: gates_exact,
                 global_phase: false,
+                prec: config.prec,
             }
         } else {
             GridSynthResult {
                 gates: gates_shifted,
                 global_phase: true,
+                prec: config.prec,
             }
         }
     }
@@ -639,7 +665,7 @@ impl crate::accuracy::AchievedDiamondError for GridSynthResult {
     /// Z-rotation by `theta`, decoded on demand from `self.gates` (accounting for the extra
     /// `e^{i pi/8}` phase `self.global_phase` records having been used, per `PhaseMode`).
     fn achieved_diamond_error(&self, theta: &FBig<HalfEven>) -> FBig<HalfEven> {
-        crate::accuracy::gate_seq_diamond_error(theta, &self.gates, self.global_phase)
+        crate::accuracy::gate_seq_diamond_error(self.prec, theta, &self.gates, self.global_phase)
     }
 }
 
@@ -647,21 +673,19 @@ impl crate::accuracy::AchievedDiamondError for GridSynthResult {
 mod tests {
     use super::*;
     use crate::config::config_from_theta_epsilon;
-    use serial_test::serial;
 
     /// Exercises the `Option<&mut CandidateStats>` path threaded through
     /// `search_for_solution`/`process_solutions` (not yet reachable from any public API).
     /// Confirms the counters are populated sensibly for a real search, without ever
     /// materializing the underlying lazy candidate iterator.
     #[test]
-    #[serial]
     fn candidate_stats_are_populated_when_provided() {
-        crate::clear_caches();
         let theta = std::f64::consts::PI / 8.0;
         let epsilon = 1e-10;
         let mut config = config_from_theta_epsilon(theta, epsilon, 1234, false, false);
 
         let (epsilon_region, unit_disk) = epsilon_region_and_unit_disk(
+            config.prec,
             config.theta.clone(),
             config.epsilon.clone(),
             PhaseMode::Exact,

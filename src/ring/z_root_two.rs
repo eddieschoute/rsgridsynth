@@ -1,12 +1,13 @@
 // Copyright (c) 2024-2025 Shun Yamamoto and Nobuyuki Yoshioka, and IBM
 // Licensed under the MIT License. See LICENSE file in the project root for full license information.
 
-use crate::common::ib_to_bf_prec;
-use crate::math::{floorsqrt, rounddiv, sign, sqrt2};
+use crate::common::Prec;
+use crate::math::rounddiv;
 use crate::ring::ZOmega;
 use dashu_base::Sign;
 use dashu_float::round::mode::HalfEven;
 use dashu_float::FBig;
+use dashu_int::ops::SquareRoot;
 use dashu_int::IBig;
 use std::cmp::Ordering;
 use std::fmt;
@@ -71,8 +72,8 @@ impl ZRootTwo {
         &self.a * &self.a - IBig::from(2) * &self.b * &self.b
     }
 
-    pub fn to_real(&self) -> FBig<HalfEven> {
-        &self.a + sqrt2() * &self.b
+    pub fn to_real(&self, prec: Prec) -> FBig<HalfEven> {
+        prec.ib(self.a.clone()) + prec.sqrt2() * &self.b
     }
 
     pub fn conj_sq2(&self) -> Self {
@@ -104,23 +105,25 @@ impl ZRootTwo {
         }
     }
 
+    /// Exact: this is an integer/rational computation throughout (`Z[√2]`'s standard
+    /// closed-form square root), so unlike most of this crate's arithmetic it needs no
+    /// working precision at all.
     pub fn sqrt(&self) -> Option<Self> {
-        let norm = ib_to_bf_prec(self.norm());
-        if norm < ib_to_bf_prec(IBig::ZERO) || self.a < IBig::ZERO {
+        let norm = self.norm();
+        if norm < IBig::ZERO || self.a < IBig::ZERO {
             return None;
         }
-        let r = floorsqrt(norm);
-        let a1 = floorsqrt(ib_to_bf_prec((&self.a + &r) / IBig::from(2)));
-        let b1 = floorsqrt(ib_to_bf_prec((&self.a - &r) / IBig::from(4)));
-        let a2 = floorsqrt(ib_to_bf_prec((&self.a - &r) / IBig::from(2)));
-        let b2 = floorsqrt(ib_to_bf_prec((&self.a + &r) / IBig::from(4)));
+        let r = IBig::from(norm.sqrt());
+        let a1 = IBig::from(((&self.a + &r) / IBig::from(2)).sqrt());
+        let b1 = IBig::from(((&self.a - &r) / IBig::from(4)).sqrt());
+        let a2 = IBig::from(((&self.a - &r) / IBig::from(2)).sqrt());
+        let b2 = IBig::from(((&self.a + &r) / IBig::from(4)).sqrt());
 
-        let (w1, w2) =
-            if sign(ib_to_bf_prec(self.a.clone())) * sign(ib_to_bf_prec(self.b.clone())) >= 0 {
-                (Self::new(a1, b1), Self::new(a2, b2))
-            } else {
-                (Self::new(a1, -b1), Self::new(a2, -b2))
-            };
+        let (w1, w2) = if self.a.signum() * self.b.signum() >= IBig::ZERO {
+            (Self::new(a1, b1), Self::new(a2, b2))
+        } else {
+            (Self::new(a1, -b1), Self::new(a2, -b2))
+        };
 
         if (*self) == (&w1 * &w1) {
             Some(w1)

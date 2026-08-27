@@ -7,32 +7,31 @@
 //! synthesis, and cross-checked against a genuinely different derivation
 //! (`independent_operator_error` below): it rebuilds the exact unitary represented by the
 //! returned gate string (via `DOmegaUnitary::from_gates`) and the ideal target rotation (via
-//! `cos_fbig`/`sin_fbig` at the same working precision) and computes the *operator*-norm
+//! `Prec::cos`/`Prec::sin` at the same working precision) and computes the *operator*-norm
 //! distance between them from the full matrix eigenvalue formula -- a different code path from
 //! `achieved_diamond_error`'s `WFrame`-based shortcut, related by the well-known
 //! `diamond = 2 * operator_norm` identity for this special (SU(2)-with-phase) matrix form. That
 //! way a bug in either derivation would show up as a disagreement, not just as both being wrong
 //! in the same way.
 
-use dashu_base::{Approximation, SquareRoot};
+use dashu_base::Approximation;
 use dashu_float::round::mode::HalfEven;
 use dashu_float::FBig;
 use num::Complex;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rsgridsynth::accuracy::AchievedDiamondError;
-use rsgridsynth::clear_caches;
-use rsgridsynth::common::{cos_fbig, fb_with_prec, get_prec_bits, sin_fbig};
+use rsgridsynth::common::Prec;
 use rsgridsynth::config::config_from_theta_epsilon;
 use rsgridsynth::gate::Gate;
 use rsgridsynth::gridsynth::gridsynth_gates;
 use rsgridsynth::unitary::DOmegaUnitary;
 use serial_test::serial;
 
-fn to_fbig(x: f64) -> FBig<HalfEven> {
+fn to_fbig(prec: Prec, x: f64) -> FBig<HalfEven> {
     FBig::<HalfEven>::try_from(x)
         .unwrap()
-        .with_precision(get_prec_bits())
+        .with_precision(prec.bits())
         .value()
 }
 
@@ -49,17 +48,22 @@ fn fbig_to_f64(x: &FBig<HalfEven>) -> f64 {
 /// not a copy of it. `shifted` selects whether the synthesized unitary should be compared up to
 /// the extra global phase `e^{i pi/8}` (this crate's `PhaseMode`), matching
 /// `GridSynthResult::global_phase`.
-fn independent_operator_error(gates: &[Gate], theta: &FBig<HalfEven>, shifted: bool) -> f64 {
-    let two = fb_with_prec(FBig::try_from(2.0).unwrap());
-    let neg_theta_half = -fb_with_prec(theta / &two);
-    let z_x = fb_with_prec(cos_fbig(&neg_theta_half));
-    let z_y = fb_with_prec(sin_fbig(&neg_theta_half));
+fn independent_operator_error(
+    prec: Prec,
+    gates: &[Gate],
+    theta: &FBig<HalfEven>,
+    shifted: bool,
+) -> f64 {
+    let two = prec.fb(FBig::try_from(2.0).unwrap());
+    let neg_theta_half = -prec.fb(theta / &two);
+    let z_x = prec.fb(neg_theta_half.cos());
+    let z_y = prec.fb(neg_theta_half.sin());
 
-    let synthesized = DOmegaUnitary::from_gates(gates).to_complex_matrix();
+    let synthesized = DOmegaUnitary::from_gates(gates).to_complex_matrix(prec);
     let mut u = synthesized[(0, 0)].clone();
     if shifted {
-        let p = to_fbig(std::f64::consts::PI / 8.);
-        let phase = Complex::new(cos_fbig(&p), sin_fbig(&p));
+        let p = to_fbig(prec, std::f64::consts::PI / 8.);
+        let phase = Complex::new(p.cos(), p.sin());
         u = &u * &phase;
     }
 
@@ -68,7 +72,7 @@ fn independent_operator_error(gates: &[Gate], theta: &FBig<HalfEven>, shifted: b
     // (0,0)-entry phase relationship.
     let eig: FBig<HalfEven> = 2 - 2 * (&z_x * &u.re + &z_y * &u.im);
     let eig = eig.max(FBig::from(0));
-    let norm = fb_with_prec(eig.sqrt());
+    let norm = eig.sqrt();
     match norm.to_f64() {
         Approximation::Inexact(v, _) => v,
         Approximation::Exact(v) => v,
@@ -93,7 +97,6 @@ fn run_accuracy_fuzz(up_to_phase: bool, thetas_per_epsilon: usize, seeds: &[u64]
         for _ in 0..thetas_per_epsilon {
             let theta = rng.random_range(0.0..std::f64::consts::TAU);
             for &seed in seeds {
-                clear_caches();
                 let mut config =
                     config_from_theta_epsilon(theta, epsilon, seed, false, up_to_phase);
                 let res = gridsynth_gates(&mut config);
@@ -108,8 +111,12 @@ fn run_accuracy_fuzz(up_to_phase: bool, thetas_per_epsilon: usize, seeds: &[u64]
                     res.gates
                 );
 
-                let independent_error =
-                    independent_operator_error(&res.gates, &config.theta, res.global_phase);
+                let independent_error = independent_operator_error(
+                    config.prec,
+                    &res.gates,
+                    &config.theta,
+                    res.global_phase,
+                );
                 assert!(
                     independent_error <= epsilon,
                     "independently computed operator error {independent_error:e} exceeds \
@@ -160,7 +167,6 @@ fn fuzz_accuracy_at_1e_minus_15() {
 
     for _ in 0..40 {
         let theta = rng.random_range(0.0..std::f64::consts::TAU);
-        clear_caches();
         let mut config = config_from_theta_epsilon(theta, epsilon, 42, false, false);
         let res = gridsynth_gates(&mut config);
 
@@ -173,7 +179,7 @@ fn fuzz_accuracy_at_1e_minus_15() {
         );
 
         let independent_error =
-            independent_operator_error(&res.gates, &config.theta, res.global_phase);
+            independent_operator_error(config.prec, &res.gates, &config.theta, res.global_phase);
         assert!(
             independent_error <= epsilon,
             "independently computed operator error {independent_error:e} exceeds requested \

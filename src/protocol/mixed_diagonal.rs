@@ -12,13 +12,13 @@
 //! ("diagonal") protocol for the same diamond-norm accuracy.
 
 use crate::accuracy::{diagonal_diamond_distance, AchievedDiamondError, WFrame};
-use crate::common::{cos_fbig, fb_with_prec, get_prec_bits, ib_to_bf_prec, sin_fbig};
+use crate::common::Prec;
 use crate::config::{config_from_theta_epsilon, GridSynthConfig};
 use crate::diophantine::diophantine_dyadic;
 use crate::gate::GateSeq;
 use crate::gridsynth::{process_solution_candidate, setup_regions_and_transform, PhaseMode};
 use crate::gridsynth::{UnitDisk, UprightTransform};
-use crate::math::{solve_quadratic, sqrt_fbig};
+use crate::math::solve_quadratic;
 use crate::normal_form::{Clifford, NormalForm};
 use crate::protocol::mixing::{diamond_to_spec_epsilon, mixture_weight};
 use crate::region::Ellipse;
@@ -37,13 +37,14 @@ use nalgebra::{Matrix2, Vector2};
 /// its module and not reachable from here, so it is duplicated verbatim rather than plumbed
 /// through a new `pub(crate)` export, per the "only touch `mixed_diagonal.rs`" constraint).
 fn matrix_multiply_2x2(
+    prec: Prec,
     a: &Matrix2<FBig<HalfEven>>,
     b: &Matrix2<FBig<HalfEven>>,
 ) -> Matrix2<FBig<HalfEven>> {
-    let mut result = Matrix2::from_element(ib_to_bf_prec(IBig::ZERO));
+    let mut result = Matrix2::from_element(prec.ib(IBig::ZERO));
     for i in 0..2 {
         for j in 0..2 {
-            let mut sum = ib_to_bf_prec(IBig::ZERO);
+            let mut sum = prec.ib(IBig::ZERO);
             for k in 0..2 {
                 sum += &a[(i, k)] * &b[(k, j)];
             }
@@ -75,16 +76,22 @@ pub struct MixedDiagonalRegion {
     z_x: FBig<HalfEven>,
     z_y: FBig<HalfEven>,
     ellipse: Ellipse,
+    prec: Prec,
 }
 
 impl MixedDiagonalRegion {
-    pub fn new(theta: &FBig<HalfEven>, epsilon: &FBig<HalfEven>, scale: ZRootTwo) -> Self {
-        let two = fb_with_prec(FBig::try_from(2.0).unwrap());
-        let theta_half = fb_with_prec(theta / &two);
-        let neg_theta_half = -fb_with_prec(theta_half);
-        let z_x: FBig<HalfEven> = fb_with_prec(cos_fbig(&neg_theta_half));
-        let z_y: FBig<HalfEven> = fb_with_prec(sin_fbig(&neg_theta_half));
-        Self::from_target_direction_impl(z_x, z_y, epsilon, scale)
+    pub fn new(
+        prec: Prec,
+        theta: &FBig<HalfEven>,
+        epsilon: &FBig<HalfEven>,
+        scale: ZRootTwo,
+    ) -> Self {
+        let two = prec.fb(FBig::try_from(2.0).unwrap());
+        let theta_half = prec.fb(theta / &two);
+        let neg_theta_half = -prec.fb(theta_half);
+        let z_x: FBig<HalfEven> = prec.fb(neg_theta_half.cos());
+        let z_y: FBig<HalfEven> = prec.fb(neg_theta_half.sin());
+        Self::from_target_direction_impl(prec, z_x, z_y, epsilon, scale)
     }
 
     /// Builds the same region as [`MixedDiagonalRegion::new`], but from the target
@@ -94,50 +101,52 @@ impl MixedDiagonalRegion {
     /// (a later stage) to build a mixed-diagonal *correction* region for a residual angle
     /// that only exists as an algebraically-derived `(cos, sin)` pair, not a raw `theta`.
     pub(crate) fn from_target_direction(
+        prec: Prec,
         z_x: FBig<HalfEven>,
         z_y: FBig<HalfEven>,
         epsilon: &FBig<HalfEven>,
         scale: ZRootTwo,
     ) -> Self {
-        Self::from_target_direction_impl(z_x, z_y, epsilon, scale)
+        Self::from_target_direction_impl(prec, z_x, z_y, epsilon, scale)
     }
 
     fn from_target_direction_impl(
+        prec: Prec,
         z_x: FBig<HalfEven>,
         z_y: FBig<HalfEven>,
         epsilon: &FBig<HalfEven>,
         scale: ZRootTwo,
     ) -> Self {
-        let two = fb_with_prec(FBig::try_from(2.0).unwrap());
-        let one = ib_to_bf_prec(IBig::ONE);
-        let zero = ib_to_bf_prec(IBig::ZERO);
-        let half_eps = fb_with_prec(epsilon / &two);
+        let two = prec.fb(FBig::try_from(2.0).unwrap());
+        let one = prec.ib(IBig::ONE);
+        let zero = prec.ib(IBig::ZERO);
+        let half_eps = epsilon / &two;
         // `epsilon` >= 2 (e.g. a derived, rescaled correction-step epsilon on a
         // near-degenerate candidate, as in `mixed_fallback::build_side`) is already past the
         // point where any point of the disk fails to qualify; the sane mathematical limit of
         // the formula below is `one_minus_half_eps = 0`, not a negative radicand. Clamp
-        // rather than let that panic in `sqrt_fbig`, matching the analogous clamp in
+        // rather than let that panic in `FBig::sqrt`, matching the analogous clamp in
         // `gridsynth::EpsilonRegion::from_target_direction_impl`.
-        let one_minus_half_eps = fb_with_prec(&one - &half_eps).max(zero.clone());
-        let scale_to_real = scale.to_real();
+        let one_minus_half_eps = (&one - &half_eps).max(zero.clone());
+        let scale_to_real = scale.to_real(prec);
 
         // Exact offset, radial semi-axis, and tangential semi-axis -- see struct docs.
-        let sqrt_s = sqrt_fbig(&scale_to_real);
-        let sqrt_one_minus_half_eps = sqrt_fbig(&one_minus_half_eps);
-        let d = fb_with_prec(&sqrt_s * &sqrt_one_minus_half_eps);
-        let h = fb_with_prec(&sqrt_s - &d);
-        let s_half_eps = fb_with_prec(&scale_to_real * &half_eps);
-        let c = sqrt_fbig(&s_half_eps);
+        let sqrt_s = scale_to_real.sqrt();
+        let sqrt_one_minus_half_eps = one_minus_half_eps.sqrt();
+        let d = &sqrt_s * &sqrt_one_minus_half_eps;
+        let h = &sqrt_s - &d;
+        let s_half_eps = &scale_to_real * &half_eps;
+        let c = s_half_eps.sqrt();
 
-        let h_sq = fb_with_prec(&h * &h);
-        let c_sq = fb_with_prec(&c * &c);
-        let inv_h_sq = fb_with_prec(&one / &h_sq);
-        let inv_c_sq = fb_with_prec(&one / &c_sq);
+        let h_sq = &h * &h;
+        let c_sq = &c * &c;
+        let inv_h_sq = &one / &h_sq;
+        let inv_c_sq = &one / &c_sq;
 
         // Same d1/d2/d3 matrix-product pattern as `EpsilonRegion::new`: d1/d3 rotate into and
         // out of the (radial, tangential) frame, d2 is the diagonal quadratic form in that
         // frame with the radial (thinner) direction first.
-        let neg_z_y: FBig<HalfEven> = -fb_with_prec(z_y.clone());
+        let neg_z_y: FBig<HalfEven> = -(z_y.clone());
         let d1: Matrix2<FBig<HalfEven>> =
             Matrix2::new(z_x.clone(), neg_z_y.clone(), z_y.clone(), z_x.clone());
         let d2: Matrix2<FBig<HalfEven>> =
@@ -145,12 +154,12 @@ impl MixedDiagonalRegion {
         let d3: Matrix2<FBig<HalfEven>> =
             Matrix2::new(z_x.clone(), z_y.clone(), neg_z_y, z_x.clone());
 
-        let px = fb_with_prec(&d * &z_x);
-        let py = fb_with_prec(&d * &z_y);
+        let px = &d * &z_x;
+        let py = &d * &z_y;
         let p = Vector2::new(px, py);
-        let m1: Matrix2<FBig<HalfEven>> = matrix_multiply_2x2(&d1, &d2);
-        let m: Matrix2<FBig<HalfEven>> = matrix_multiply_2x2(&m1, &d3);
-        let ellipse = Ellipse::new(m, p);
+        let m1: Matrix2<FBig<HalfEven>> = matrix_multiply_2x2(prec, &d1, &d2);
+        let m: Matrix2<FBig<HalfEven>> = matrix_multiply_2x2(prec, &m1, &d3);
+        let ellipse = Ellipse::new(m, p, prec);
 
         Self {
             scale,
@@ -158,6 +167,7 @@ impl MixedDiagonalRegion {
             z_x,
             z_y,
             ellipse,
+            prec,
         }
     }
 }
@@ -168,35 +178,37 @@ impl Region for MixedDiagonalRegion {
     }
 
     fn inside(&self, u: &DOmega) -> bool {
-        let cos_term1 = fb_with_prec(&self.z_x * u.real());
-        let cos_term2 = fb_with_prec(&self.z_y * u.imag());
-        let cos_similarity = fb_with_prec(&cos_term1 + &cos_term2);
+        let prec = self.prec;
+        let cos_term1 = &self.z_x * u.real(prec);
+        let cos_term2 = &self.z_y * u.imag(prec);
+        let cos_similarity = &cos_term1 + &cos_term2;
 
         DRootTwo::from_domega(u.conj() * u) <= DRootTwo::from_zroottwo(self.scale.clone())
             && cos_similarity >= self.d
     }
 
     fn intersect(&self, u0: &DOmega, v: &DOmega) -> Option<(FBig<HalfEven>, FBig<HalfEven>)> {
+        let prec = self.prec;
         let a = v.conj() * v;
         let b = 2 * (v.conj() * u0);
         let c = u0.conj() * u0 - DOmega::from_zroottwo(&self.scale);
-        let vz_term1 = fb_with_prec(&self.z_x * v.real());
-        let vz_term2 = fb_with_prec(&self.z_y * v.imag());
-        let vz = fb_with_prec(&vz_term1 + &vz_term2);
+        let vz_term1 = &self.z_x * v.real(prec);
+        let vz_term2 = &self.z_y * v.imag(prec);
+        let vz = &vz_term1 + &vz_term2;
 
-        let term1 = fb_with_prec(&self.z_x * u0.real());
-        let term2 = fb_with_prec(&self.z_y * u0.imag());
-        let temp_sub = fb_with_prec(&self.d - &term1);
-        let rhs = fb_with_prec(&temp_sub - &term2);
+        let term1 = &self.z_x * u0.real(prec);
+        let term2 = &self.z_y * u0.imag(prec);
+        let temp_sub = &self.d - &term1;
+        let rhs = &temp_sub - &term2;
         // t0 <= t1
-        let (t0, t1) = solve_quadratic(a.real(), b.real(), c.real())?;
-        let zero = fb_with_prec(ib_to_bf_prec(IBig::ZERO));
+        let (t0, t1) = solve_quadratic(prec, a.real(prec), b.real(prec), c.real(prec))?;
+        let zero = prec.ib(IBig::ZERO);
 
         if vz > zero {
-            let t2 = fb_with_prec(&rhs / &vz);
+            let t2 = &rhs / &vz;
             Some(if t0 > t2 { (t0, t1) } else { (t2, t1) })
         } else if vz < zero {
-            let t2 = fb_with_prec(&rhs / &vz);
+            let t2 = &rhs / &vz;
             Some(if t1 < t2 { (t0, t1) } else { (t0, t2) })
         } else if rhs <= zero {
             Some((t0, t1))
@@ -247,8 +259,8 @@ pub(crate) fn search_for_straddling_pair<A: Region + std::fmt::Debug>(
     // See `gridsynth::search_for_solution` for the rationale behind this bound: it is
     // effectively unreachable for well-formed inputs and exists only to fail loudly (rather
     // than hang) if a `Region` predicate is broken.
-    let max_k = 4 * get_prec_bits() as i64;
-    let zero = ib_to_bf_prec(IBig::ZERO);
+    let max_k = 4 * config.prec.bits() as i64;
+    let zero = config.prec.ib(IBig::ZERO);
 
     let mut lo: Option<DOmegaUnitary> = None;
     let mut hi: Option<DOmegaUnitary> = None;
@@ -292,15 +304,15 @@ pub(crate) fn search_for_straddling_pair<A: Region + std::fmt::Debug>(
                 // below, using floating `im_w` (the only place that measures the *angle*, as
                 // opposed to just the magnitude `xi`) to confirm the phase genuinely matches
                 // before short-circuiting on it. `im_w` mixes two independently rounded
-                // floating approximations of the same irrational value (`cos_fbig`/`sin_fbig`'s
-                // Taylor series for `z_x`/`z_y` vs. `sqrt2()`'s Newton iteration inside
+                // floating approximations of the same irrational value (`Prec::cos`/`Prec::sin`
+                // for `z_x`/`z_y` vs. `Prec::sqrt2`'s Newton iteration inside
                 // `u.real()`/`u.imag()`), so it is not bit-exact even for a genuine exact
                 // match -- but that rounding noise is many orders of magnitude below
                 // `phase_tolerance` (working precision scales with `-log(epsilon)`), while a
                 // genuinely off-angle candidate that merely passed the region's wide
                 // containment check sits well above it, so the threshold cleanly separates the
                 // two cases without needing bit-exact equality.
-                if xi.to_real() == zero && im.clone().abs() <= *phase_tolerance {
+                if xi.to_real(config.prec) == zero && im.clone().abs() <= *phase_tolerance {
                     if let Some(w_val) =
                         diophantine_dyadic(xi.clone(), &mut config.diophantine_data)
                     {
@@ -425,6 +437,8 @@ pub struct MixedDiagonalBranch {
 #[derive(Debug, Clone)]
 pub struct MixedDiagonalResult {
     pub branches: Vec<MixedDiagonalBranch>,
+    /// The working precision this result was synthesized at.
+    pub prec: Prec,
 }
 
 impl MixedDiagonalResult {
@@ -448,10 +462,11 @@ impl MixedDiagonalResult {
     /// each *individual* branch is only as close to the target as the (much looser)
     /// straddling-search tolerance, not the mixture's own tighter budget.
     pub(crate) fn achieved_diamond_error_with_frame(&self, wframe: &WFrame) -> FBig<HalfEven> {
+        let prec = self.prec;
         if self.branches.len() == 1 {
             let u = DOmegaUnitary::from_gates(&self.branches[0].gates);
             let re_w = wframe.re_w(u.z());
-            return diagonal_diamond_distance(&re_w);
+            return diagonal_diamond_distance(prec, &re_w);
         }
         assert_eq!(
             self.branches.len() % 2,
@@ -467,7 +482,7 @@ impl MixedDiagonalResult {
         let re_hi = wframe.re_w(hi_u.z());
         let im_hi = wframe.im_w(hi_u.z());
 
-        mixture_weight((&re_lo, &im_lo), (&re_hi, &im_hi))
+        mixture_weight(prec, (&re_lo, &im_lo), (&re_hi, &im_hi))
             .expect("a real assembled Mixed result must yield a valid mixture")
             .projective_diamond_error
     }
@@ -475,7 +490,7 @@ impl MixedDiagonalResult {
 
 impl AchievedDiamondError for MixedDiagonalResult {
     fn achieved_diamond_error(&self, theta: &FBig<HalfEven>) -> FBig<HalfEven> {
-        self.achieved_diamond_error_with_frame(&WFrame::new(theta))
+        self.achieved_diamond_error_with_frame(&WFrame::new(self.prec, theta))
     }
 }
 
@@ -490,7 +505,11 @@ impl AchievedDiamondError for MixedDiagonalResult {
 /// of `hi` at weight `(1-p)/4` each), so the classical mixture is invariant under an
 /// additional random {Z,S} twirl -- required for the mixture to implement a genuine
 /// depolarizing-style probabilistic channel rather than leak phase information.
-pub(crate) fn assemble_result(outcome: StraddleOutcome, wframe: &WFrame) -> MixedDiagonalResult {
+pub(crate) fn assemble_result(
+    prec: Prec,
+    outcome: StraddleOutcome,
+    wframe: &WFrame,
+) -> MixedDiagonalResult {
     match outcome {
         StraddleOutcome::NotFound => panic!(
             "search_for_straddling_pair: exceeded max_k without finding a straddling pair \
@@ -501,8 +520,9 @@ pub(crate) fn assemble_result(outcome: StraddleOutcome, wframe: &WFrame) -> Mixe
             MixedDiagonalResult {
                 branches: vec![MixedDiagonalBranch {
                     gates,
-                    weight: ib_to_bf_prec(IBig::ONE),
+                    weight: prec.ib(IBig::ONE),
                 }],
+                prec,
             }
         }
         StraddleOutcome::Mixed(lo, hi) => {
@@ -512,17 +532,17 @@ pub(crate) fn assemble_result(outcome: StraddleOutcome, wframe: &WFrame) -> Mixe
             let re_hi = wframe.re_w(hi.z());
             let im_hi = wframe.im_w(hi.z());
 
-            let mw = mixture_weight((&re_lo, &im_lo), (&re_hi, &im_hi)).expect(
+            let mw = mixture_weight(prec, (&re_lo, &im_lo), (&re_hi, &im_hi)).expect(
                 "mixture_weight returned None for a real solved straddling pair -- this \
                  indicates a genuine bug (search_for_straddling_pair only ever produces \
                  im_lo <= 0 <= im_hi pairs), not an expected degenerate input",
             );
 
-            let one = ib_to_bf_prec(IBig::ONE);
-            let four = fb_with_prec(FBig::try_from(4.0).unwrap());
-            let one_minus_p = fb_with_prec(&one - &mw.p);
-            let p_over_4 = fb_with_prec(&mw.p / &four);
-            let one_minus_p_over_4 = fb_with_prec(&one_minus_p / &four);
+            let one = prec.ib(IBig::ONE);
+            let four = prec.fb(FBig::try_from(4.0).unwrap());
+            let one_minus_p = &one - &mw.p;
+            let p_over_4 = &mw.p / &four;
+            let one_minus_p_over_4 = &one_minus_p / &four;
 
             // Decompose the untwirled candidate once per side and cheaply relabel the other
             // three variants (`relabel_by_twirl`), instead of independently re-running
@@ -543,7 +563,7 @@ pub(crate) fn assemble_result(outcome: StraddleOutcome, wframe: &WFrame) -> Mixe
                 });
             }
 
-            MixedDiagonalResult { branches }
+            MixedDiagonalResult { branches, prec }
         }
     }
 }
@@ -572,12 +592,13 @@ pub fn synth_mixed_diagonal(
     // *value* stored in `config.epsilon` here is still the diamond-norm epsilon; the spec
     // epsilon actually used to build the region is derived from it just below.
     let mut config = config_from_theta_epsilon(theta, epsilon_diamond, seed, verbose, false);
-    let epsilon_spec = diamond_to_spec_epsilon(&config.epsilon);
+    let prec = config.prec;
+    let epsilon_spec = diamond_to_spec_epsilon(prec, &config.epsilon);
 
     let scale = ZRootTwo::new(IBig::from(1), IBig::from(0));
-    let region = MixedDiagonalRegion::new(&config.theta, &epsilon_spec, scale.clone());
-    let unit_disk = UnitDisk::new(scale);
-    let wframe = WFrame::new(&config.theta);
+    let region = MixedDiagonalRegion::new(prec, &config.theta, &epsilon_spec, scale.clone());
+    let unit_disk = UnitDisk::new(prec, scale);
+    let wframe = WFrame::new(prec, &config.theta);
 
     let transformed =
         setup_regions_and_transform(&region, &unit_disk, config.verbose, config.measure_time);
@@ -591,23 +612,25 @@ pub fn synth_mixed_diagonal(
         &epsilon_spec,
     );
 
-    assemble_result(outcome, &wframe)
+    assemble_result(prec, outcome, &wframe)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::reset_prec_bits;
     use dashu_base::Approximation;
     use dashu_int::ops::Abs;
     use rand::{rngs::StdRng, Rng, SeedableRng};
-    use serial_test::serial;
     use std::f64::consts::PI;
 
-    fn to_fbig(x: f64) -> FBig<HalfEven> {
+    /// Fixed precision for tests that build values without going through
+    /// `config_from_theta_epsilon` (which carries its own derived `Prec`).
+    const PREC: Prec = Prec(1000);
+
+    fn to_fbig(prec: Prec, x: f64) -> FBig<HalfEven> {
         FBig::<HalfEven>::try_from(x)
             .unwrap()
-            .with_precision(get_prec_bits())
+            .with_precision(prec.bits())
             .value()
     }
 
@@ -622,16 +645,16 @@ mod tests {
     /// `config_from_theta_epsilon` for a given epsilon (which allocates working precision
     /// roughly proportional to epsilon's decimal digit count -- e.g. only ~60 bits for
     /// epsilon=1e-5, not this crate's default 1000-bit `PREC_BITS_INITIAL`). Using a fixed,
-    /// generous tolerance like 200 bits regardless of `get_prec_bits()` would spuriously fail
-    /// whenever the configured working precision is lower than that, even though the
+    /// generous tolerance like 200 bits regardless of the actual precision would spuriously
+    /// fail whenever the configured working precision is lower than that, even though the
     /// underlying arithmetic identity holds exactly up to genuine rounding.
-    fn safe_tol_bits() -> usize {
-        get_prec_bits().saturating_sub(30)
+    fn safe_tol_bits(prec: Prec) -> usize {
+        prec.bits().saturating_sub(30)
     }
 
     fn approx_eq(a: &FBig<HalfEven>, b: &FBig<HalfEven>, tol_bits: usize) -> bool {
         let diff = (a - b).abs();
-        let tol = ib_to_bf_prec(IBig::ONE) / ib_to_bf_prec(IBig::ONE << tol_bits);
+        let tol = PREC.ib(IBig::ONE) / PREC.ib(IBig::ONE << tol_bits);
         diff <= tol
     }
 
@@ -650,10 +673,11 @@ mod tests {
         GridSynthConfig,
     ) {
         let config = config_from_theta_epsilon(theta_f64, epsilon, seed, false, false);
+        let prec = config.prec;
         let scale = ZRootTwo::new(IBig::from(1), IBig::from(0));
-        let region = MixedDiagonalRegion::new(&config.theta, &config.epsilon, scale.clone());
-        let unit_disk = UnitDisk::new(scale);
-        let wframe = WFrame::new(&config.theta);
+        let region = MixedDiagonalRegion::new(prec, &config.theta, &config.epsilon, scale.clone());
+        let unit_disk = UnitDisk::new(prec, scale);
+        let wframe = WFrame::new(prec, &config.theta);
         let transformed =
             setup_regions_and_transform(&region, &unit_disk, config.verbose, config.measure_time);
         (region, unit_disk, transformed, wframe, config)
@@ -671,36 +695,28 @@ mod tests {
     // eps^2/8 instead of the exact `sqrt(s) - d`), since that would move the arc-midpoint
     // radial coordinate away from `h` and push its quadratic-form value above 1.
     #[test]
-    #[serial]
     fn mixed_diagonal_region_boundary_points_inside_ellipse() {
-        reset_prec_bits();
-        let theta = to_fbig(0.7);
-        let epsilon = to_fbig(0.3);
+        let theta = to_fbig(PREC, 0.7);
+        let epsilon = to_fbig(PREC, 0.3);
         let scale = ZRootTwo::from_int(IBig::from(1));
 
-        let region = MixedDiagonalRegion::new(&theta, &epsilon, scale.clone());
+        let region = MixedDiagonalRegion::new(PREC, &theta, &epsilon, scale.clone());
 
-        let two = to_fbig(2.0);
-        let half_eps = fb_with_prec(&epsilon / &two);
-        let scale_to_real = scale.to_real();
-        let sqrt_s = sqrt_fbig(&scale_to_real);
-        let c = sqrt_fbig(&fb_with_prec(&scale_to_real * &half_eps));
+        let two = to_fbig(PREC, 2.0);
+        let half_eps = &epsilon / &two;
+        let scale_to_real = scale.to_real(PREC);
+        let sqrt_s = scale_to_real.sqrt();
+        let c = (&scale_to_real * &half_eps).sqrt();
 
         let d = region.d.clone();
         let z_x = region.z_x.clone();
         let z_y = region.z_y.clone();
 
         // Chord endpoints: (z_x*d -/+ z_y*c, z_y*d +/- z_x*c).
-        let ep_plus = Vector2::new(
-            fb_with_prec(fb_with_prec(&z_x * &d) - fb_with_prec(&z_y * &c)),
-            fb_with_prec(fb_with_prec(&z_y * &d) + fb_with_prec(&z_x * &c)),
-        );
-        let ep_minus = Vector2::new(
-            fb_with_prec(fb_with_prec(&z_x * &d) + fb_with_prec(&z_y * &c)),
-            fb_with_prec(fb_with_prec(&z_y * &d) - fb_with_prec(&z_x * &c)),
-        );
+        let ep_plus = Vector2::new((&z_x * &d) - (&z_y * &c), (&z_y * &d) + (&z_x * &c));
+        let ep_minus = Vector2::new((&z_x * &d) + (&z_y * &c), (&z_y * &d) - (&z_x * &c));
         // Outer-arc midpoint: sqrt(s) * (z_x, z_y).
-        let cap_top = Vector2::new(fb_with_prec(&sqrt_s * &z_x), fb_with_prec(&sqrt_s * &z_y));
+        let cap_top = Vector2::new(&sqrt_s * &z_x, &sqrt_s * &z_y);
 
         let ellipse = region.ellipse();
 
@@ -716,15 +732,11 @@ mod tests {
         // containment -- utterly negligible next to the kind of gross error (e.g. an
         // asymptotic-height formula off by a factor of ~2) this test is meant to catch.
         let center = ellipse.p.clone();
-        let shrink = fb_with_prec(&ib_to_bf_prec(IBig::ONE) - &to_fbig(1e-9));
+        let shrink = &PREC.ib(IBig::ONE) - &to_fbig(PREC, 1e-9);
         let nudge_towards_center = |pt: &Vector2<FBig<HalfEven>>| -> Vector2<FBig<HalfEven>> {
             Vector2::new(
-                fb_with_prec(
-                    &center[0] + fb_with_prec(&shrink * fb_with_prec(&pt[0] - &center[0])),
-                ),
-                fb_with_prec(
-                    &center[1] + fb_with_prec(&shrink * fb_with_prec(&pt[1] - &center[1])),
-                ),
+                &center[0] + (&shrink * (&pt[0] - &center[0])),
+                &center[1] + (&shrink * (&pt[1] - &center[1])),
             )
         };
         let ep_plus = nudge_towards_center(&ep_plus);
@@ -745,10 +757,7 @@ mod tests {
         );
 
         // Sanity: a point diametrically opposite the cap must NOT be inside.
-        let far_side = Vector2::new(
-            fb_with_prec(-(&sqrt_s * &z_x)),
-            fb_with_prec(-(&sqrt_s * &z_y)),
-        );
+        let far_side = Vector2::new(-(&sqrt_s * &z_x), -(&sqrt_s * &z_y));
         assert!(
             !ellipse.inside(&far_side),
             "diametrically opposite point should not be inside"
@@ -758,10 +767,8 @@ mod tests {
     // ---- Task 2: single-enumeration straddling-pair search ----
 
     #[test]
-    #[serial]
     fn straddling_search_finds_mixed_pair_for_generic_angles() {
         for k in [1i64, 3, 5, 7] {
-            crate::clear_caches();
             let theta_f64 = k as f64 * PI / 32.0;
             let epsilon = 1e-6;
             let (region, unit_disk, transformed, wframe, mut config) =
@@ -796,10 +803,8 @@ mod tests {
     // theta in {pi/2, pi} (both multiples of pi/2) rather than the {pi/2, pi/4} the original
     // task spec suggested -- pi/4 genuinely belongs in the "Mixed" bucket, not "Unmixed".
     #[test]
-    #[serial]
     fn straddling_search_finds_unmixed_for_exact_angles() {
         for theta_f64 in [PI / 2.0, PI] {
-            crate::clear_caches();
             let epsilon = 1e-6;
             let (region, unit_disk, transformed, wframe, mut config) = setup(theta_f64, epsilon, 7);
 
@@ -822,9 +827,7 @@ mod tests {
     // ---- Task 3: twirl construction ----
 
     #[test]
-    #[serial]
     fn twirl_variants_preserve_top_left_entry_exactly() {
-        crate::clear_caches();
         let theta_f64 = 3.0 * PI / 32.0;
         let epsilon = 1e-6;
         let (region, unit_disk, transformed, wframe, mut config) = setup(theta_f64, epsilon, 99);
@@ -844,9 +847,9 @@ mod tests {
         };
 
         for original in [lo, hi] {
-            let orig_top_left = original.to_complex_matrix()[(0, 0)].clone();
+            let orig_top_left = original.to_complex_matrix(PREC)[(0, 0)].clone();
             for variant in twirl_variants(&original) {
-                let variant_top_left = variant.to_complex_matrix()[(0, 0)].clone();
+                let variant_top_left = variant.to_complex_matrix(PREC)[(0, 0)].clone();
                 assert_eq!(
                     variant_top_left, orig_top_left,
                     "twirl variant changed the (0,0) entry"
@@ -854,7 +857,7 @@ mod tests {
 
                 let gates = decompose_domega_unitary(variant);
                 let reconstructed_top_left =
-                    DOmegaUnitary::from_gates(&gates).to_complex_matrix()[(0, 0)].clone();
+                    DOmegaUnitary::from_gates(&gates).to_complex_matrix(PREC)[(0, 0)].clone();
                 assert_eq!(
                     reconstructed_top_left, orig_top_left,
                     "re-multiplying the decomposed gate string changed the (0,0) entry"
@@ -872,7 +875,6 @@ mod tests {
     /// pre-filter, if this ever regresses it fails loudest here first) across several
     /// `(theta, epsilon)` pairs spanning coarse to fine tolerances.
     #[test]
-    #[serial]
     fn relabel_by_twirl_matches_independent_decomposition() {
         let cases: [(f64, f64, u64); 4] = [
             (3.0 * PI / 32.0, 1e-6, 99),
@@ -881,7 +883,6 @@ mod tests {
             (5.9, 1e-10, 21),
         ];
         for (theta_f64, epsilon, seed) in cases {
-            crate::clear_caches();
             let (region, unit_disk, transformed, wframe, mut config) =
                 setup(theta_f64, epsilon, seed);
             let phase_tolerance = config.epsilon.clone();
@@ -932,9 +933,7 @@ mod tests {
     // diamond-norm error (`crate::protocol::mixing`'s own tests already cover the formula in
     // isolation; this re-checks it end-to-end against this module's real search output).
     #[test]
-    #[serial]
     fn absolute_oracle_end_to_end_error_matches_closed_form() {
-        crate::clear_caches();
         let theta_f64 = 3.0 * PI / 32.0;
         let epsilon = 1e-5;
         let (region, unit_disk, transformed, wframe, mut config) = setup(theta_f64, epsilon, 55);
@@ -958,30 +957,25 @@ mod tests {
         let re_hi = wframe.re_w(hi.z());
         let im_hi = wframe.im_w(hi.z());
 
-        assert!(
-            im_lo <= ib_to_bf_prec(IBig::ZERO),
-            "lo branch must under-rotate"
-        );
-        assert!(
-            im_hi >= ib_to_bf_prec(IBig::ZERO),
-            "hi branch must over-rotate"
-        );
+        assert!(im_lo <= PREC.ib(IBig::ZERO), "lo branch must under-rotate");
+        assert!(im_hi >= PREC.ib(IBig::ZERO), "hi branch must over-rotate");
 
-        let mw = mixture_weight((&re_lo, &im_lo), (&re_hi, &im_hi))
+        let prec = config.prec;
+        let mw = mixture_weight(prec, (&re_lo, &im_lo), (&re_hi, &im_hi))
             .expect("mixture_weight should succeed for a real straddling pair");
 
         // Cross-check the closed form directly: error == 2*(p*im_lo^2 + (1-p)*im_hi^2).
-        let one = ib_to_bf_prec(IBig::ONE);
-        let two = to_fbig(2.0);
-        let one_minus_p = fb_with_prec(&one - &mw.p);
-        let lo_term = fb_with_prec(&mw.p * fb_with_prec(&im_lo * &im_lo));
-        let hi_term = fb_with_prec(&one_minus_p * fb_with_prec(&im_hi * &im_hi));
-        let expected_error = fb_with_prec(&two * fb_with_prec(&lo_term + &hi_term));
+        let one = prec.ib(IBig::ONE);
+        let two = to_fbig(prec, 2.0);
+        let one_minus_p = &one - &mw.p;
+        let lo_term = &mw.p * (&im_lo * &im_lo);
+        let hi_term = &one_minus_p * (&im_hi * &im_hi);
+        let expected_error = &two * (&lo_term + &hi_term);
         assert!(
             approx_eq(
                 &mw.projective_diamond_error,
                 &expected_error,
-                safe_tol_bits()
+                safe_tol_bits(prec)
             ),
             "mixed error {} != closed form {}",
             mw.projective_diamond_error,
@@ -990,34 +984,33 @@ mod tests {
 
         // Mixing must beat each branch's own unmixed diamond error (quadratic vs linear-order
         // residual), using the real solved re_w values.
-        let unmixed_lo = crate::protocol::mixing::diagonal_diamond_distance(&re_lo);
-        let unmixed_hi = crate::protocol::mixing::diagonal_diamond_distance(&re_hi);
+        let unmixed_lo = crate::protocol::mixing::diagonal_diamond_distance(prec, &re_lo);
+        let unmixed_hi = crate::protocol::mixing::diagonal_diamond_distance(prec, &re_hi);
         assert!(mw.projective_diamond_error < unmixed_lo);
         assert!(mw.projective_diamond_error < unmixed_hi);
 
         // Round-trip both candidates through decompose/from_gates and confirm the (0,0) entry
         // used in the error computation above matches what actually gets synthesized.
         let gates_lo = decompose_domega_unitary(lo.clone());
-        let reconstructed_lo = DOmegaUnitary::from_gates(&gates_lo).to_complex_matrix();
-        assert_eq!(reconstructed_lo[(0, 0)], lo.to_complex_matrix()[(0, 0)]);
+        let reconstructed_lo = DOmegaUnitary::from_gates(&gates_lo).to_complex_matrix(prec);
+        assert_eq!(reconstructed_lo[(0, 0)], lo.to_complex_matrix(prec)[(0, 0)]);
         let gates_hi = decompose_domega_unitary(hi.clone());
-        let reconstructed_hi = DOmegaUnitary::from_gates(&gates_hi).to_complex_matrix();
-        assert_eq!(reconstructed_hi[(0, 0)], hi.to_complex_matrix()[(0, 0)]);
+        let reconstructed_hi = DOmegaUnitary::from_gates(&gates_hi).to_complex_matrix(prec);
+        assert_eq!(reconstructed_hi[(0, 0)], hi.to_complex_matrix(prec)[(0, 0)]);
     }
 
     // Required test 4: branch weights sum to 1.
     #[test]
-    #[serial]
     fn branch_weights_sum_to_one() {
         for (theta_f64, epsilon) in [(3.0 * PI / 32.0, 1e-5), (PI / 2.0, 1e-5), (PI / 4.0, 1e-5)] {
-            crate::clear_caches();
             let result = synth_mixed_diagonal(theta_f64, epsilon, 321, false);
-            let mut total = ib_to_bf_prec(IBig::ZERO);
+            let prec = result.prec;
+            let mut total = prec.ib(IBig::ZERO);
             for branch in &result.branches {
-                total = fb_with_prec(&total + &branch.weight);
+                total = &total + &branch.weight;
             }
             assert!(
-                approx_eq(&total, &ib_to_bf_prec(IBig::ONE), safe_tol_bits()),
+                approx_eq(&total, &prec.ib(IBig::ONE), safe_tol_bits(prec)),
                 "branch weights for theta={theta_f64} summed to {total}, not 1"
             );
         }
@@ -1029,11 +1022,10 @@ mod tests {
     // the original task spec's {pi/2, pi/4} -- pi/4 has no exact solution and correctly goes
     // through the Mixed path (already exercised by `branch_weights_sum_to_one` above).
     #[test]
-    #[serial]
     fn degenerate_angles_produce_unmixed_result() {
         for theta_f64 in [PI / 2.0, PI] {
-            crate::clear_caches();
             let result = synth_mixed_diagonal(theta_f64, 1e-6, 654, false);
+            let prec = result.prec;
             assert_eq!(
                 result.branches.len(),
                 1,
@@ -1041,22 +1033,22 @@ mod tests {
             );
             assert!(approx_eq(
                 &result.branches[0].weight,
-                &ib_to_bf_prec(IBig::ONE),
-                safe_tol_bits()
+                &prec.ib(IBig::ONE),
+                safe_tol_bits(prec)
             ));
             // `achieved_diamond_error` is computed via `WFrame::re_w`/`diagonal_diamond_distance`,
             // which mixes two independently-rounded floating trig approximations
-            // (`cos_fbig`/`sin_fbig`) that do not cancel to bit-exact zero even when the true
+            // (`Prec::cos`/`Prec::sin`) that do not cancel to bit-exact zero even when the true
             // rotation error is exactly zero (same caveat this module already documents for
             // `im_w`) -- so this must be an approximate, not exact, equality check.
             // `diagonal_diamond_distance`'s `sqrt` roughly halves the number of reliable bits
             // (a `re_w` deviation of `d` near 1 becomes an error of order `sqrt(d)`), so the
-            // usual `safe_tol_bits()` is too tight here.
-            let theta = to_fbig(theta_f64);
+            // usual `safe_tol_bits(prec)` is too tight here.
+            let theta = to_fbig(prec, theta_f64);
             assert!(approx_eq(
                 &result.achieved_diamond_error(&theta),
-                &ib_to_bf_prec(IBig::ZERO),
-                safe_tol_bits() / 2
+                &prec.ib(IBig::ZERO),
+                safe_tol_bits(prec) / 2
             ));
         }
     }
@@ -1072,7 +1064,6 @@ mod tests {
     // T-count is `GateSeq::t_count()`, which counts `Gate::T` occurrences directly -- no
     // string round-trip through `NormalForm` needed.
     #[test]
-    #[serial]
     fn slope_fit_cost_vs_log2_inv_epsilon() {
         let mut rng = StdRng::seed_from_u64(2024);
         let num_angles = 24;
@@ -1091,7 +1082,6 @@ mod tests {
         for (eps_idx, &eps) in epsilons.iter().enumerate() {
             let mut total_cost = 0.0;
             for (i, &theta) in angles.iter().enumerate() {
-                crate::clear_caches();
                 let seed = 10_000 + (eps_idx * 1000 + i) as u64;
                 let result = synth_mixed_diagonal(theta, eps, seed, false);
                 let mut cost = 0.0;
