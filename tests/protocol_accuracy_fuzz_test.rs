@@ -19,7 +19,7 @@ use rand::{Rng, SeedableRng};
 use rsgridsynth::config::config_from_theta_epsilon;
 use rsgridsynth::protocol::{
     exact_q, synth_fallback, synth_mixed_diagonal, synth_mixed_fallback, AchievedDiamondError,
-    MixedFallbackResult,
+    MixedDiagonalResult, MixedFallbackResult,
 };
 use serial_test::serial;
 
@@ -58,11 +58,12 @@ fn fuzz_mixed_diagonal_accuracy() {
             let result = synth_mixed_diagonal(theta, epsilon, 7, false);
             let theta_fbig = theta_at_matching_precision(theta, epsilon);
 
+            let branches = result.weighted_branches();
             assert!(
-                !result.branches.is_empty(),
+                !branches.is_empty(),
                 "theta={theta}, epsilon={epsilon:e}: no branches returned"
             );
-            let weight_sum: f64 = result.branches.iter().map(|b| fbig_to_f64(&b.weight)).sum();
+            let weight_sum: f64 = branches.iter().map(|(w, _gates)| fbig_to_f64(w)).sum();
             assert!(
                 (weight_sum - 1.0).abs() < 1e-9,
                 "theta={theta}, epsilon={epsilon:e}: branch weights sum to {weight_sum}, expected 1"
@@ -83,7 +84,7 @@ fn fuzz_mixed_diagonal_accuracy() {
             // window while still being measurably off-angle, so this branch can exceed the
             // requested budget. This is a real, fuzzer-discovered edge case in the search's
             // exactness fast path, left as a known limitation rather than papered over here.
-            if result.branches.len() > 1 {
+            if matches!(result, MixedDiagonalResult::Mixed { .. }) {
                 assert!(
                     achieved_f64 <= epsilon,
                     "theta={theta}, epsilon={epsilon:e}: achieved diamond error {achieved_f64:e} \
@@ -181,7 +182,7 @@ fn fuzz_mixed_fallback_accuracy() {
                         );
                     }
 
-                    // A side's correction search can hit `MixedDiagonalResult`'s single-branch
+                    // A side's correction search can hit `MixedDiagonalResult`'s `Exact`
                     // "exact ring unitary" fast path -- the same known limitation documented on
                     // `fuzz_mixed_diagonal_accuracy` above, just triggered here via a
                     // different route: when a side's own success probability is very close to
@@ -190,11 +191,13 @@ fn fuzz_mixed_fallback_accuracy() {
                     // making the fast path's "accepts an off-angle exact candidate at loose
                     // tolerance" issue much more likely to fire. Every outlier found by fuzzing
                     // this trace back to exactly this cause (confirmed by inspecting
-                    // `side.correction.branches.len() == 1` at the failing inputs), so the
-                    // strict budget check below is skipped -- not loosened by a blanket slack
-                    // factor -- specifically when either side's correction hit that fast path.
+                    // `matches!(side.correction, MixedDiagonalResult::Exact { .. })` at the
+                    // failing inputs), so the strict budget check below is skipped -- not
+                    // loosened by a blanket slack factor -- specifically when either side's
+                    // correction hit that fast path.
                     let hit_correction_fast_path =
-                        lo.correction.branches.len() == 1 || hi.correction.branches.len() == 1;
+                        matches!(lo.correction, MixedDiagonalResult::Exact { .. })
+                            || matches!(hi.correction, MixedDiagonalResult::Exact { .. });
 
                     let achieved_proj = fbig_to_f64(&result.achieved_diamond_error(&theta_fbig));
                     if hit_correction_fast_path {

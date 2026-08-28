@@ -63,7 +63,9 @@ pub struct MixedFallbackSide {
     /// Gate sequence for this side's projective step, applied unconditionally.
     pub projective_gates: GateSeq,
     /// The mixed-diagonal correction for this side's residual angle, needed with probability
-    /// `1 - achieved_success_probability()`.
+    /// `1 - achieved_success_probability()`. Sampling it (see
+    /// [`MixedDiagonalResult::Mixed`]) draws its own biased coin plus two fair coins,
+    /// independently of whatever coin selected this side in the first place.
     pub correction: MixedDiagonalResult,
     /// The working precision this side was synthesized at.
     pub prec: Prec,
@@ -134,6 +136,18 @@ pub enum MixedFallbackResult {
     /// The general case: two straddling projective branches, mixed with probability `p`
     /// (`lo` at weight `p`, `hi` at weight `1-p`), each with its own achieved success
     /// probability and mixed-diagonal correction.
+    ///
+    /// The full runtime sequence, once per invocation:
+    ///   1. flip one **biased** coin -- `lo` with probability `p`, else `hi`;
+    ///   2. run that side's `projective_gates` unconditionally (the ancilla + measurement
+    ///      circuit around it is out of this crate's scope -- see the module docs);
+    ///   3. on the measurement's failure outcome (probability
+    ///      `1 - side.achieved_success_probability()`), sample that side's `correction` by its
+    ///      own biased coin plus two fair coins (see [`MixedDiagonalResult::Mixed`]) and apply
+    ///      the resulting gate word.
+    ///
+    /// The coin in step 3 is drawn independently of the one in step 1 -- selecting `lo` says
+    /// nothing about which of `lo.correction`'s branches (if any) gets sampled.
     Mixed {
         lo: MixedFallbackSide,
         /// Boxed purely to keep this enum's variants closer in size (clippy
@@ -375,11 +389,7 @@ mod tests {
     fn total_expected_t_count(side: &MixedFallbackSide) -> f64 {
         let p_t = side.projective_gates.t_count() as f64;
         let fail_prob = 1.0 - fbig_to_f64(&side.achieved_success_probability());
-        let mut correction_cost = 0.0;
-        for branch in &side.correction.branches {
-            let t = branch.gates.t_count() as f64;
-            correction_cost += fbig_to_f64(&branch.weight) * t;
-        }
+        let correction_cost = fbig_to_f64(&side.correction.expected_t_count());
         p_t + fail_prob * correction_cost
     }
 
@@ -437,10 +447,12 @@ mod tests {
                 // Each side's correction branch weights sum to 1 (Stage 1's own invariant,
                 // re-checked here end-to-end).
                 for side in [&lo, &hi] {
-                    let mut total = 0.0;
-                    for branch in &side.correction.branches {
-                        total += fbig_to_f64(&branch.weight);
-                    }
+                    let total: f64 = side
+                        .correction
+                        .weighted_branches()
+                        .iter()
+                        .map(|(w, _gates)| fbig_to_f64(w))
+                        .sum();
                     assert!(
                         (total - 1.0).abs() < 1e-3,
                         "correction branch weights summed to {total}, not 1"
