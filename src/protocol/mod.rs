@@ -13,7 +13,7 @@ pub use mixing::{
 };
 
 pub use mixed_diagonal::{
-    synth_mixed_diagonal, MixedDiagonalBranch, MixedDiagonalRegion, MixedDiagonalResult,
+    synth_mixed_diagonal, twirl_cliffords, MixedDiagonalRegion, MixedDiagonalResult,
 };
 
 pub use fallback::{exact_q, synth_fallback, FallbackResult, SectorRegion};

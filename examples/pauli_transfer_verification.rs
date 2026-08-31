@@ -440,9 +440,9 @@ fn rotation_mixture_diamond_distance(weighted_phase_sq: &[(Fb, Cx)], theta: &Fb)
 
 fn mixed_diagonal_pauli_branches(result: &MixedDiagonalResult) -> Vec<(Fb, M2)> {
     result
-        .branches
-        .iter()
-        .map(|b| (b.weight.clone(), matrix_from_gates(&b.gates)))
+        .weighted_branches()
+        .into_iter()
+        .map(|(weight, gates)| (weight, matrix_from_gates(&gates)))
         .collect()
 }
 

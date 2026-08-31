@@ -19,7 +19,7 @@ use crate::gate::GateSeq;
 use crate::gridsynth::{process_solution_candidate, setup_regions_and_transform, PhaseMode};
 use crate::gridsynth::{UnitDisk, UprightTransform};
 use crate::math::solve_quadratic;
-use crate::normal_form::{Clifford, NormalForm};
+use crate::normal_form::{conjugate_by_clifford, Clifford};
 use crate::protocol::mixing::{diamond_to_spec_epsilon, mixture_weight};
 use crate::region::Ellipse;
 use crate::ring::{DOmega, DRootTwo, ZRootTwo};
@@ -380,131 +380,177 @@ pub(crate) fn twirl_variants(u: &DOmegaUnitary) -> [DOmegaUnitary; 4] {
     })
 }
 
-/// Cheap replacement for `decompose_domega_unitary(twirl_variants(u)[m])`: `twirl_variants`'s
-/// `m`-th variant is exactly `S^m * U * (S^m)^-1` (verified by
-/// `twirl_variants_preserve_top_left_entry_exactly` and re-derived in this function's own
-/// doc), and conjugating a unitary by a fixed Clifford is, at the *gate-word* level, exactly
-/// conjugating the word: build `S^m ++ base_gates ++ (S^m)^-1` and re-run it through the
-/// already-public, already-tested `NormalForm::from_gates`/`to_gates` normalization. This
-/// reuses the crate's existing Matsumoto-Amano machinery instead of re-running
-/// `decompose_domega_unitary`'s number-theoretic `k`-reduction loop (`reduce_denomexp`'s
-/// arbitrary-precision ring arithmetic) a second time for a result that's already known --
-/// only `O(gates.len())` `u8`-table lookups, no `DOmega`/`ZOmega` arithmetic at all.
+/// The `{I, S, Z, SZ}` diagonal-Clifford twirl group used by the mixed protocols: `S^m` for
+/// `m in 0..4`. Not a `const`/`static` because `Clifford::new` normalizes its arguments (cheap,
+/// but not a `const fn`).
 ///
-/// `m = 0` returns `base_gates` unchanged (`S^0 = I`) -- callers should special-case it to skip
-/// the no-op round trip rather than rely on this function, since `S^0`'s `to_gates()` is empty
-/// but `NormalForm::from_gates` would still re-walk and re-normalize the whole word for no
-/// benefit.
+/// An implementer with only fair coins draws two bits `(b1, b0)` and conjugates by
+/// `twirl_cliffords()[2*b1 + b0]`.
+pub fn twirl_cliffords() -> [Clifford; 4] {
+    std::array::from_fn(|m| Clifford::new(0, 0, m as i32, 0))
+}
+
+/// The output of [`synth_mixed_diagonal`]: a classical probabilistic-channel approximation of
+/// `R_z(theta)`. Call [`AchievedDiamondError::achieved_diamond_error`] to compute the achieved
+/// projective-step diamond-norm error on demand.
 ///
-/// Exactness: this computes the *true* Matsumoto-Amano normal form of `S^m * U * (S^m)^-1`,
-/// not an approximation -- `assemble_result`'s
-/// `relabel_by_twirl_matches_independent_decomposition` test below asserts byte-for-byte
-/// equality against independent decomposition of `twirl_variants`, across many `(theta,
-/// epsilon)` pairs, before this function was ever used in `assemble_result`.
-pub(crate) fn relabel_by_twirl(base_gates: &GateSeq, m: usize) -> GateSeq {
-    let c_m = Clifford::new(0, 0, m as i32, 0); // S^m
-    let mut word = c_m.to_gates();
-    word.extend(base_gates);
-    word.extend(&c_m.inv().to_gates());
-    NormalForm::from_gates(&word).to_gates()
-}
-
-/// All four twirl variants' gate sequences, decomposing the (`m = 0`) base candidate once and
-/// cheaply relabeling the other three via [`relabel_by_twirl`].
-fn twirl_variant_gates(u: DOmegaUnitary) -> [GateSeq; 4] {
-    let base = decompose_domega_unitary(u);
-    std::array::from_fn(|m| {
-        if m == 0 {
-            base.clone()
-        } else {
-            relabel_by_twirl(&base, m)
-        }
-    })
-}
-
-/// One weighted branch of a [`MixedDiagonalResult`]: a Clifford+T gate sequence and the
-/// classical probability with which the mixed channel applies it.
+/// The two variants spell out exactly what randomness a caller needs to sample this channel:
+/// `Exact` needs none, `Mixed` needs one biased coin and two fair coins.
 #[derive(Debug, Clone)]
-pub struct MixedDiagonalBranch {
-    pub gates: GateSeq,
-    pub weight: FBig<HalfEven>,
-}
-
-/// The output of [`synth_mixed_diagonal`]: a classical mixture of Clifford+T circuits
-/// (`branches`, with weights summing to 1) implementing a probabilistic-channel
-/// approximation of `R_z(theta)`. Call [`AchievedDiamondError::achieved_diamond_error`] to
-/// compute the achieved projective-step diamond-norm error on demand.
-#[derive(Debug, Clone)]
-pub struct MixedDiagonalResult {
-    pub branches: Vec<MixedDiagonalBranch>,
-    /// The working precision this result was synthesized at.
-    pub prec: Prec,
+pub enum MixedDiagonalResult {
+    /// The target direction was ring-exactly representable (e.g. `theta` a multiple of
+    /// `pi/2`): one gate word suffices, with zero synthesis error and no randomness at all.
+    Exact { gates: GateSeq, prec: Prec },
+    /// The general case. Sampling this channel, once per use:
+    ///   1. flip one **biased** coin: `lo` with probability `p`, else `hi`;
+    ///   2. flip two **fair** coins to get `m = 2*b1 + b0 in 0..4`;
+    ///   3. run [`conjugate_by_clifford`]`(chosen_side, twirl_cliffords()[m])` (or, equivalently,
+    ///      the same convenience via [`MixedDiagonalResult::gates_for`]).
+    ///
+    /// The twirl changes neither the decoded top-left entry `z` (hence not the rotation error)
+    /// nor the T-count (conjugation by a Clifford preserves both) -- see
+    /// `mixed_diagonal_twirl_preserves_z_and_t_count` -- so `lo`/`hi` are stored untwirled, and
+    /// error/cost computations never need to materialize a conjugate.
+    Mixed {
+        /// `P(lo)`. Strictly between 0 and 1 -- a degenerate mixture (`p` exactly 0 or 1)
+        /// collapses to `Exact` instead (see [`assemble_result`]).
+        p: FBig<HalfEven>,
+        /// The under-rotation side's untwirled gate word.
+        lo: GateSeq,
+        /// The over-rotation side's untwirled gate word.
+        hi: GateSeq,
+        /// The working precision this result was synthesized at.
+        prec: Prec,
+    },
 }
 
 impl MixedDiagonalResult {
-    /// Recomputes the achieved diamond-norm error to the target direction encoded by `wframe`,
-    /// directly from the public `branches`, decoding each gate string back into a unitary.
-    /// [`AchievedDiamondError::achieved_diamond_error`] is a thin wrapper over this that builds
-    /// `wframe` from a raw `theta` via [`WFrame::new`] -- this lower-level entry point exists
-    /// so a caller that already has a target direction as a `(cos, sin)` half-angle pair (e.g.
-    /// a fallback correction's residual angle) can reuse the exact same mixture-aware
-    /// computation without a lossy angle round-trip.
-    ///
-    /// For the single-branch (exact-angle) case this decodes that one candidate and computes
-    /// its diamond distance directly. For the general (8-twirled-branch) case:
-    /// [`twirl_variants`] only ever rotates a candidate's `w`, never its `z`, so every branch
-    /// within the `lo` family (the first half) and within the `hi` family (the second half)
-    /// shares the same `z` and hence the same `Re(w)`/`Im(w)`. This decodes one representative
-    /// from each family and reapplies [`mixture_weight`]'s closed form -- naively
-    /// triangle-inequality-summing the distance of all 8 individual branches (an earlier,
-    /// wrong version of this crate's `mixed_fallback` correction accuracy check made exactly
-    /// this mistake) would throw away the quadratic cancellation the mixture achieves, since
-    /// each *individual* branch is only as close to the target as the (much looser)
-    /// straddling-search tolerance, not the mixture's own tighter budget.
-    pub(crate) fn achieved_diamond_error_with_frame(&self, wframe: &WFrame) -> FBig<HalfEven> {
-        let prec = self.prec;
-        if self.branches.len() == 1 {
-            let u = DOmegaUnitary::from_gates(&self.branches[0].gates);
-            let re_w = wframe.re_w(u.z());
-            return diagonal_diamond_distance(prec, &re_w);
+    /// The working precision this result was synthesized at.
+    fn prec(&self) -> Prec {
+        match self {
+            MixedDiagonalResult::Exact { prec, .. } => *prec,
+            MixedDiagonalResult::Mixed { prec, .. } => *prec,
         }
-        assert_eq!(
-            self.branches.len() % 2,
-            0,
-            "a mixed result's branches must split evenly into lo/hi twirl families"
-        );
-        let half = self.branches.len() / 2;
+    }
 
-        let lo_u = DOmegaUnitary::from_gates(&self.branches[0].gates);
-        let hi_u = DOmegaUnitary::from_gates(&self.branches[half].gates);
-        let re_lo = wframe.re_w(lo_u.z());
-        let im_lo = wframe.im_w(lo_u.z());
-        let re_hi = wframe.re_w(hi_u.z());
-        let im_hi = wframe.im_w(hi_u.z());
+    /// The word to actually run, given the two draws described on [`MixedDiagonalResult::Mixed`].
+    /// `Exact` ignores both arguments. `twirl` is taken mod 4 (any of the 4 fair-coin encodings
+    /// of `m` works).
+    pub fn gates_for(&self, take_lo: bool, twirl: usize) -> GateSeq {
+        match self {
+            MixedDiagonalResult::Exact { gates, .. } => gates.clone(),
+            MixedDiagonalResult::Mixed { lo, hi, .. } => {
+                let side = if take_lo { lo } else { hi };
+                let m = twirl % 4;
+                if m == 0 {
+                    side.clone()
+                } else {
+                    conjugate_by_clifford(side, twirl_cliffords()[m])
+                }
+            }
+        }
+    }
 
-        mixture_weight(prec, (&re_lo, &im_lo), (&re_hi, &im_hi))
-            .expect("a real assembled Mixed result must yield a valid mixture")
-            .projective_diamond_error
+    /// Flat categorical view: every `(weight, gate word)` pair, weights summing to 1 --
+    /// `Exact` yields one pair at weight 1; `Mixed` yields 8 (four of `lo` at `p/4` each, four
+    /// of `hi` at `(1-p)/4` each), materializing each twirl conjugate via
+    /// [`conjugate_by_clifford`].
+    ///
+    /// This is the *derived* view, for error/cost math and verification -- it does the
+    /// conjugation work `Mixed`'s own docs say is unnecessary for those computations, so
+    /// prefer `Mixed`'s fields directly, or [`MixedDiagonalResult::expected_t_count`], when
+    /// only the error or the average cost is needed.
+    pub fn weighted_branches(&self) -> Vec<(FBig<HalfEven>, GateSeq)> {
+        match self {
+            MixedDiagonalResult::Exact { gates, prec } => {
+                vec![(prec.ib(IBig::ONE), gates.clone())]
+            }
+            MixedDiagonalResult::Mixed { p, prec, .. } => {
+                let one = prec.ib(IBig::ONE);
+                let four = prec.fb(FBig::try_from(4.0).unwrap());
+                let one_minus_p = &one - p;
+                let p_over_4 = p / &four;
+                let one_minus_p_over_4 = &one_minus_p / &four;
+
+                let mut branches = Vec::with_capacity(8);
+                for m in 0..4 {
+                    branches.push((p_over_4.clone(), self.gates_for(true, m)));
+                }
+                for m in 0..4 {
+                    branches.push((one_minus_p_over_4.clone(), self.gates_for(false, m)));
+                }
+                branches
+            }
+        }
+    }
+
+    /// Weight-averaged T-count -- the protocol's mean cost. `Exact` is that one word's T-count;
+    /// `Mixed` is `p*t_count(lo) + (1-p)*t_count(hi)`, since a twirl preserves T-count (no
+    /// conjugation needed to compute this).
+    pub fn expected_t_count(&self) -> FBig<HalfEven> {
+        match self {
+            MixedDiagonalResult::Exact { gates, prec } => prec.ib(IBig::from(gates.t_count())),
+            MixedDiagonalResult::Mixed { p, lo, hi, prec } => {
+                let one = prec.ib(IBig::ONE);
+                let one_minus_p = &one - p;
+                let lo_t = prec.ib(IBig::from(lo.t_count()));
+                let hi_t = prec.ib(IBig::from(hi.t_count()));
+                (p * &lo_t) + (&one_minus_p * &hi_t)
+            }
+        }
+    }
+
+    /// Recomputes the achieved diamond-norm error to the target direction encoded by `wframe`,
+    /// directly from the public `lo`/`hi` gate strings (no conjugation needed -- see `Mixed`'s
+    /// own docs on why a twirl doesn't change `z`). [`AchievedDiamondError::achieved_diamond_error`]
+    /// is a thin wrapper over this that builds `wframe` from a raw `theta` via [`WFrame::new`]
+    /// -- this lower-level entry point exists so a caller that already has a target direction
+    /// as a `(cos, sin)` half-angle pair (e.g. a fallback correction's residual angle) can
+    /// reuse the exact same mixture-aware computation without a lossy angle round-trip.
+    pub(crate) fn achieved_diamond_error_with_frame(&self, wframe: &WFrame) -> FBig<HalfEven> {
+        let prec = self.prec();
+        match self {
+            MixedDiagonalResult::Exact { gates, .. } => {
+                let u = DOmegaUnitary::from_gates(gates);
+                let re_w = wframe.re_w(u.z());
+                diagonal_diamond_distance(prec, &re_w)
+            }
+            MixedDiagonalResult::Mixed { lo, hi, .. } => {
+                let lo_u = DOmegaUnitary::from_gates(lo);
+                let hi_u = DOmegaUnitary::from_gates(hi);
+                let re_lo = wframe.re_w(lo_u.z());
+                let im_lo = wframe.im_w(lo_u.z());
+                let re_hi = wframe.re_w(hi_u.z());
+                let im_hi = wframe.im_w(hi_u.z());
+
+                mixture_weight(prec, (&re_lo, &im_lo), (&re_hi, &im_hi))
+                    .expect("a real assembled Mixed result must yield a valid mixture")
+                    .projective_diamond_error
+            }
+        }
     }
 }
 
 impl AchievedDiamondError for MixedDiagonalResult {
     fn achieved_diamond_error(&self, theta: &FBig<HalfEven>) -> FBig<HalfEven> {
-        self.achieved_diamond_error_with_frame(&WFrame::new(self.prec, theta))
+        self.achieved_diamond_error_with_frame(&WFrame::new(self.prec(), theta))
     }
 }
 
-/// Turns a [`StraddleOutcome`] into the final weighted branch list.
+/// Turns a [`StraddleOutcome`] into the final [`MixedDiagonalResult`].
 ///
-/// For the `Unmixed` (exact-angle) case, this emits a single branch of weight 1 rather than
-/// 4 twirl variants of weight 1/4 each: twirling an exact solution (zero rotation error) is
-/// harmless but has no error-cancellation purpose, so the single-branch form is the simpler,
-/// equally-correct choice.
+/// For the `Unmixed` (exact-angle) case, this emits `Exact`: twirling an exact solution (zero
+/// rotation error) is harmless but has no error-cancellation purpose, so the untwirled form is
+/// the simpler, equally-correct choice.
 ///
-/// For the `Mixed` case, this emits all 8 twirl variants (4 of `lo` at weight `p/4` each, 4
-/// of `hi` at weight `(1-p)/4` each), so the classical mixture is invariant under an
-/// additional random {Z,S} twirl -- required for the mixture to implement a genuine
-/// depolarizing-style probabilistic channel rather than leak phase information.
+/// For the `Mixed` case, [`mixture_weight`] can itself return `p` exactly 0 or exactly 1 when
+/// one side is already an exact solution ("Degenerate exact solutions" in its own docs) -- in
+/// that case this also collapses to `Exact` on the surviving side, rather than emitting a
+/// `Mixed` result with a side that can never be sampled. Otherwise this emits `Mixed { p, lo,
+/// hi }`; the classical mixture is invariant under an additional random `{Z,S}` twirl on
+/// whichever side gets sampled -- required for the mixture to implement a genuine
+/// depolarizing-style probabilistic channel rather than leak phase information -- but nothing
+/// is precomputed for it (see [`MixedDiagonalResult::gates_for`]).
 pub(crate) fn assemble_result(
     prec: Prec,
     outcome: StraddleOutcome,
@@ -515,16 +561,10 @@ pub(crate) fn assemble_result(
             "search_for_straddling_pair: exceeded max_k without finding a straddling pair \
              (or an exact solution) -- region predicate is likely incorrect"
         ),
-        StraddleOutcome::Unmixed(u) => {
-            let gates = decompose_domega_unitary(u);
-            MixedDiagonalResult {
-                branches: vec![MixedDiagonalBranch {
-                    gates,
-                    weight: prec.ib(IBig::ONE),
-                }],
-                prec,
-            }
-        }
+        StraddleOutcome::Unmixed(u) => MixedDiagonalResult::Exact {
+            gates: decompose_domega_unitary(u),
+            prec,
+        },
         StraddleOutcome::Mixed(lo, hi) => {
             let hi = *hi;
             let re_lo = wframe.re_w(lo.z());
@@ -539,31 +579,26 @@ pub(crate) fn assemble_result(
             );
 
             let one = prec.ib(IBig::ONE);
-            let four = prec.fb(FBig::try_from(4.0).unwrap());
-            let one_minus_p = &one - &mw.p;
-            let p_over_4 = &mw.p / &four;
-            let one_minus_p_over_4 = &one_minus_p / &four;
-
-            // Decompose the untwirled candidate once per side and cheaply relabel the other
-            // three variants (`relabel_by_twirl`), instead of independently re-running
-            // `decompose_domega_unitary`'s number-theoretic `k`-reduction loop 8 times total.
-            // Exactness is proved once, ahead of this call site, by
-            // `relabel_by_twirl_matches_independent_decomposition` above.
-            let mut branches = Vec::with_capacity(8);
-            for gates in twirl_variant_gates(lo) {
-                branches.push(MixedDiagonalBranch {
-                    gates,
-                    weight: p_over_4.clone(),
-                });
+            let zero = prec.ib(IBig::ZERO);
+            if mw.p == zero {
+                return MixedDiagonalResult::Exact {
+                    gates: decompose_domega_unitary(hi),
+                    prec,
+                };
             }
-            for gates in twirl_variant_gates(hi) {
-                branches.push(MixedDiagonalBranch {
-                    gates,
-                    weight: one_minus_p_over_4.clone(),
-                });
+            if mw.p == one {
+                return MixedDiagonalResult::Exact {
+                    gates: decompose_domega_unitary(lo),
+                    prec,
+                };
             }
 
-            MixedDiagonalResult { branches, prec }
+            MixedDiagonalResult::Mixed {
+                p: mw.p,
+                lo: decompose_domega_unitary(lo),
+                hi: decompose_domega_unitary(hi),
+                prec,
+            }
         }
     }
 }
@@ -866,16 +901,17 @@ mod tests {
         }
     }
 
-    /// The load-bearing correctness proof for [`relabel_by_twirl`], run *before* it is ever
-    /// used in `assemble_result` below: for real solved candidates (from a genuine
-    /// `search_for_straddling_pair` call, not synthetic numbers), every one of its three
-    /// nontrivial outputs (`m = 1, 2, 3`) must be byte-for-byte identical to independently
-    /// calling `decompose_domega_unitary` on `twirl_variants(u)[m]` -- the expensive path this
-    /// function replaces. Also pins the T-count invariant (`assemble_result`'s cheap
-    /// pre-filter, if this ever regresses it fails loudest here first) across several
+    /// The load-bearing correctness proof for [`conjugate_by_clifford`] as used via
+    /// [`twirl_cliffords`], run *before* it is ever used in `assemble_result`/`gates_for`
+    /// below: for real solved candidates (from a genuine `search_for_straddling_pair` call,
+    /// not synthetic numbers), every one of its three nontrivial outputs (`m = 1, 2, 3`) must
+    /// be byte-for-byte identical to independently calling `decompose_domega_unitary` on
+    /// `twirl_variants(u)[m]` -- the expensive path this function replaces. Also pins the
+    /// T-count invariant (`MixedDiagonalResult::expected_t_count`'s justification for never
+    /// conjugating: if this ever regresses it fails loudest here first) across several
     /// `(theta, epsilon)` pairs spanning coarse to fine tolerances.
     #[test]
-    fn relabel_by_twirl_matches_independent_decomposition() {
+    fn conjugate_by_clifford_matches_independent_decomposition() {
         let cases: [(f64, f64, u64); 4] = [
             (3.0 * PI / 32.0, 1e-6, 99),
             (0.7, 1e-4, 7),
@@ -900,18 +936,20 @@ mod tests {
                 other => panic!("expected Mixed or Unmixed, got {other:?}"),
             };
 
+            let twirls = twirl_cliffords();
             for original in [lo, hi] {
                 let base_gates = decompose_domega_unitary(original.clone());
-                for m in 0..4 {
-                    let expected = decompose_domega_unitary(twirl_variants(&original)[m].clone());
+                let variants = twirl_variants(&original);
+                for (m, (variant, &c)) in variants.iter().zip(twirls.iter()).enumerate() {
+                    let expected = decompose_domega_unitary(variant.clone());
                     let actual = if m == 0 {
                         base_gates.clone()
                     } else {
-                        relabel_by_twirl(&base_gates, m)
+                        conjugate_by_clifford(&base_gates, c)
                     };
                     assert_eq!(
                         actual, expected,
-                        "theta={theta_f64} eps={epsilon} seed={seed} m={m}: relabel_by_twirl \
+                        "theta={theta_f64} eps={epsilon} seed={seed} m={m}: conjugate_by_clifford \
                          disagrees with independent decomposition\n  actual:   {actual}\n  \
                          expected: {expected}"
                     );
@@ -921,6 +959,62 @@ mod tests {
                         "theta={theta_f64} eps={epsilon} seed={seed} m={m}: twirl changed T-count"
                     );
                 }
+            }
+        }
+    }
+
+    /// The invariant [`MixedDiagonalResult::achieved_diamond_error_with_frame`] and
+    /// [`MixedDiagonalResult::expected_t_count`] rely on to never materialize a twirl
+    /// conjugate: for a genuine `Mixed` result, conjugating either side by any of
+    /// [`twirl_cliffords`] leaves both the decoded top-left entry `z` and the T-count
+    /// unchanged.
+    #[test]
+    fn mixed_diagonal_twirl_preserves_z_and_t_count() {
+        let theta_f64 = 3.0 * PI / 32.0;
+        let epsilon = 1e-5;
+        let result = synth_mixed_diagonal(theta_f64, epsilon, 321, false);
+        let prec = result.prec();
+        let MixedDiagonalResult::Mixed { lo, hi, .. } = &result else {
+            panic!("expected Mixed at this (theta, epsilon)");
+        };
+
+        for side in [lo, hi] {
+            let orig_z = DOmegaUnitary::from_gates(side).to_complex_matrix(prec)[(0, 0)].clone();
+            let orig_t = side.t_count();
+            for &c in &twirl_cliffords() {
+                let conjugated = conjugate_by_clifford(side, c);
+                assert_eq!(
+                    conjugated.t_count(),
+                    orig_t,
+                    "twirl {c} changed T-count for side {side}"
+                );
+                let z = DOmegaUnitary::from_gates(&conjugated).to_complex_matrix(prec)[(0, 0)]
+                    .clone();
+                assert_eq!(
+                    z, orig_z,
+                    "twirl {c} changed the (0,0) entry for side {side}"
+                );
+            }
+        }
+    }
+
+    /// Pins [`assemble_result`]'s degenerate collapse: `mixture_weight` returning `p` exactly 0
+    /// or exactly 1 (one side already exact) must produce `Exact`, not a `Mixed` with a
+    /// zero-probability side. For a genuine (non-degenerate) `Mixed` result, `p` must be
+    /// strictly interior.
+    #[test]
+    fn mixed_diagonal_p_is_strictly_interior_or_collapses_to_exact() {
+        let theta_f64 = 3.0 * PI / 32.0;
+        let epsilon = 1e-5;
+        let result = synth_mixed_diagonal(theta_f64, epsilon, 321, false);
+        let prec = result.prec();
+        match result {
+            MixedDiagonalResult::Exact { .. } => {}
+            MixedDiagonalResult::Mixed { p, .. } => {
+                assert!(
+                    p > prec.ib(IBig::ZERO) && p < prec.ib(IBig::ONE),
+                    "p={p} is not strictly interior"
+                );
             }
         }
     }
@@ -1004,10 +1098,10 @@ mod tests {
     fn branch_weights_sum_to_one() {
         for (theta_f64, epsilon) in [(3.0 * PI / 32.0, 1e-5), (PI / 2.0, 1e-5), (PI / 4.0, 1e-5)] {
             let result = synth_mixed_diagonal(theta_f64, epsilon, 321, false);
-            let prec = result.prec;
+            let prec = result.prec();
             let mut total = prec.ib(IBig::ZERO);
-            for branch in &result.branches {
-                total = &total + &branch.weight;
+            for (weight, _gates) in result.weighted_branches() {
+                total = &total + &weight;
             }
             assert!(
                 approx_eq(&total, &prec.ib(IBig::ONE), safe_tol_bits(prec)),
@@ -1016,26 +1110,20 @@ mod tests {
         }
     }
 
-    // Required test 5: degenerate angles produce a single-total-weight Unmixed result. See
-    // the note above `straddling_search_finds_unmixed_for_exact_angles` for why pi/2 and pi
-    // (both multiples of pi/2, hence ring-exact target directions) are used here rather than
-    // the original task spec's {pi/2, pi/4} -- pi/4 has no exact solution and correctly goes
-    // through the Mixed path (already exercised by `branch_weights_sum_to_one` above).
+    // Required test 5: degenerate angles produce an Exact result. See the note above
+    // `straddling_search_finds_unmixed_for_exact_angles` for why pi/2 and pi (both multiples
+    // of pi/2, hence ring-exact target directions) are used here rather than the original task
+    // spec's {pi/2, pi/4} -- pi/4 has no exact solution and correctly goes through the Mixed
+    // path (already exercised by `branch_weights_sum_to_one` above).
     #[test]
     fn degenerate_angles_produce_unmixed_result() {
         for theta_f64 in [PI / 2.0, PI] {
             let result = synth_mixed_diagonal(theta_f64, 1e-6, 654, false);
-            let prec = result.prec;
-            assert_eq!(
-                result.branches.len(),
-                1,
-                "expected the single-branch Unmixed form for theta={theta_f64}"
+            let prec = result.prec();
+            assert!(
+                matches!(result, MixedDiagonalResult::Exact { .. }),
+                "expected the Exact form for theta={theta_f64}"
             );
-            assert!(approx_eq(
-                &result.branches[0].weight,
-                &prec.ib(IBig::ONE),
-                safe_tol_bits(prec)
-            ));
             // `achieved_diamond_error` is computed via `WFrame::re_w`/`diagonal_diamond_distance`,
             // which mixes two independently-rounded floating trig approximations
             // (`Prec::cos`/`Prec::sin`) that do not cancel to bit-exact zero even when the true
@@ -1084,12 +1172,7 @@ mod tests {
             for (i, &theta) in angles.iter().enumerate() {
                 let seed = 10_000 + (eps_idx * 1000 + i) as u64;
                 let result = synth_mixed_diagonal(theta, eps, seed, false);
-                let mut cost = 0.0;
-                for branch in &result.branches {
-                    let t_count = branch.gates.t_count() as f64;
-                    cost += fbig_to_f64(&branch.weight) * t_count;
-                }
-                total_cost += cost;
+                total_cost += fbig_to_f64(&result.expected_t_count());
             }
             mean_cost.push(total_cost / angles.len() as f64);
         }

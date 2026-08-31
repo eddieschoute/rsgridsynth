@@ -127,6 +127,23 @@ impl Display for Clifford {
     }
 }
 
+/// `c * gates * c^-1`, renormalized to Matsumoto-Amano form. Exact, not an approximation --
+/// conjugating a unitary by a fixed Clifford is, at the gate-word level, exactly conjugating
+/// the word: build `c ++ gates ++ c^-1` and re-run it through `NormalForm::from_gates`/
+/// `to_gates`. This is also T-count-preserving, since conjugation by a Clifford cannot change
+/// the number of non-Clifford (T) gates in the normal form.
+///
+/// This is the general-purpose replacement for what a caller would otherwise need
+/// `decompose_domega_unitary` (the number-theoretic `k`-reduction loop) to recompute from
+/// scratch on `c * U * c^-1` for a `U` it already decoded `gates` from: only
+/// `O(gates.len())` `u8`-table lookups, no `DOmega`/`ZOmega` arithmetic at all.
+pub fn conjugate_by_clifford(gates: &[Gate], c: Clifford) -> GateSeq {
+    let mut word = c.to_gates();
+    word.extend(gates);
+    word.extend(&c.inv().to_gates());
+    NormalForm::from_gates(&word).to_gates()
+}
+
 impl Mul for Clifford {
     type Output = Self;
     fn mul(self, rhs: Self) -> Self {
