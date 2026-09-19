@@ -426,7 +426,7 @@ pub enum MixedDiagonalResult {
 
 impl MixedDiagonalResult {
     /// The working precision this result was synthesized at.
-    fn prec(&self) -> Prec {
+    pub(crate) fn prec(&self) -> Prec {
         match self {
             MixedDiagonalResult::Exact { prec, .. } => *prec,
             MixedDiagonalResult::Mixed { prec, .. } => *prec,
@@ -497,6 +497,24 @@ impl MixedDiagonalResult {
                 let hi_t = prec.ib(IBig::from(hi.t_count()));
                 (p * &lo_t) + (&one_minus_p * &hi_t)
             }
+        }
+    }
+
+    /// Worst-case T-count -- the T-count of whichever branch actually gets sampled, in the
+    /// unluckiest case. `Exact` is that one word's T-count (also the worst case, since it's
+    /// the only case). `Mixed` is `max(t_count(lo), t_count(hi))`, since a twirl preserves
+    /// T-count (same reasoning as `expected_t_count`).
+    ///
+    /// This matters alongside [`MixedDiagonalResult::expected_t_count`] specifically for the
+    /// small-angle protocol ([`crate::protocol::small_angle`]): pinning one branch to the
+    /// identity collapses the *mean* T-count, but the *searched* branch's own T-count is
+    /// often larger than the even-split protocol's would be (a larger, looser region costs
+    /// less on average only because it is used rarely) -- so a consumer that must reserve
+    /// worst-case resources (e.g. magic states) per rotation needs this, not just the mean.
+    pub fn max_t_count(&self) -> usize {
+        match self {
+            MixedDiagonalResult::Exact { gates, .. } => gates.t_count(),
+            MixedDiagonalResult::Mixed { lo, hi, .. } => lo.t_count().max(hi.t_count()),
         }
     }
 
@@ -988,8 +1006,8 @@ mod tests {
                     orig_t,
                     "twirl {c} changed T-count for side {side}"
                 );
-                let z = DOmegaUnitary::from_gates(&conjugated).to_complex_matrix(prec)[(0, 0)]
-                    .clone();
+                let z =
+                    DOmegaUnitary::from_gates(&conjugated).to_complex_matrix(prec)[(0, 0)].clone();
                 assert_eq!(
                     z, orig_z,
                     "twirl {c} changed the (0,0) entry for side {side}"
