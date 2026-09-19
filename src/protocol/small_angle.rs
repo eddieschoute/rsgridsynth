@@ -691,6 +691,79 @@ mod tests {
         );
     }
 
+    // Slope fit: Bothe Eq. (66) predicts, in the delta >> theta^2 regime, a power law
+    // T ~ 2*(theta^2/delta)*log2(...) -- i.e. roughly LINEAR in 1/delta (up to a slowly
+    // varying log factor), sharply different from the angle-independent protocols' T ~
+    // log2(1/delta). This fits the log-log slope of mean T-count against 1/delta (averaged
+    // over several angles per delta, to smooth the discreteness of small T-counts, mirroring
+    // `mixed_diagonal::tests::slope_fit_cost_vs_log2_inv_epsilon`'s own averaging) and checks
+    // it lands near 1, not near 0 (which would indicate the region was accidentally behaving
+    // like the angle-independent regime instead). It also checks, for every individual
+    // (theta, delta) sample point, that the achieved diamond-norm error actually meets its
+    // own delta -- the T-count savings are worthless if the accuracy criterion silently
+    // slipped.
+    #[test]
+    fn small_angle_slope_fit_and_per_point_accuracy() {
+        use crate::accuracy::AchievedDiamondError as _;
+
+        // theta values small enough that theta^2 (~1e-10) is far below every delta tried
+        // below, so every sample point stays in Bothe's delta >> theta^2 regime. The deltas
+        // are chosen BELOW theta itself (not just above theta^2): delta >= theta would let
+        // the identity alone satisfy the budget trivially (T-count 0 for every angle),
+        // degenerating the fit -- see the comment on `synth_small_angle`'s identity fast
+        // path. Genuine mixing requires theta > 2*sin(theta/2) ~= theta > delta.
+        let thetas: [f64; 6] = [3e-6, 5e-6, 7e-6, 1e-5, 1.5e-5, 2e-5];
+        let deltas = [1e-6_f64, 1e-7, 1e-8];
+
+        let mut mean_cost = Vec::with_capacity(deltas.len());
+        for (delta_idx, &delta) in deltas.iter().enumerate() {
+            let mut total_cost = 0.0;
+            for (i, &theta) in thetas.iter().enumerate() {
+                let seed = 20_000 + (delta_idx * 1000 + i) as u64;
+                let result = synth_small_angle(theta, delta, seed, false).unwrap_or_else(|| {
+                    panic!("expected a result for theta={theta}, delta={delta}")
+                });
+                let prec = prec_of(&result);
+
+                // Per-point accuracy criterion: the achieved diamond-norm error, recomputed
+                // independently from the result's own public gate word(s) (not from any
+                // internal search state), must not exceed the requested delta. A small
+                // floating-point slack accounts for the same independently-rounded-trig
+                // noise `mixed_diagonal`'s own tests document (`safe_tol_bits`/`approx_eq`
+                // patterns above) -- this is a hard accuracy check, not a fit, so the slack
+                // is kept tight (1%).
+                let theta_fbig = to_fbig(prec, theta);
+                let delta_fbig = to_fbig(prec, delta);
+                let achieved = result.achieved_diamond_error(&theta_fbig);
+                assert!(
+                    achieved <= delta_fbig.clone() * to_fbig(prec, 1.01),
+                    "theta={theta}, delta={delta}: achieved diamond error {achieved} exceeds \
+                     the requested budget {delta_fbig}"
+                );
+
+                total_cost += fbig_to_f64(&result.expected_t_count());
+            }
+            mean_cost.push(total_cost / thetas.len() as f64);
+        }
+
+        let log_inv_delta: Vec<f64> = deltas.iter().map(|d| (1.0_f64 / d).ln()).collect();
+        let log_cost: Vec<f64> = mean_cost.iter().map(|c| c.max(1e-12).ln()).collect();
+        let slope = (log_cost[log_cost.len() - 1] - log_cost[0])
+            / (log_inv_delta[log_inv_delta.len() - 1] - log_inv_delta[0]);
+
+        eprintln!(
+            "small-angle slope fit: mean_cost={mean_cost:?} at delta={deltas:?} -> log-log \
+             slope vs 1/delta = {slope:.4} (Bothe Eq. 66 predicts ~1; angle-independent \
+             protocols would show ~0 on this log-log-vs-1/delta axis)"
+        );
+
+        assert!(
+            slope > 0.5 && slope < 1.5,
+            "measured log-log slope {slope:.4} is far from the ~1 the theta^2/delta power \
+             law (Bothe Eq. 66) predicts; mean_cost={mean_cost:?}"
+        );
+    }
+
     // Regime switch: for delta << theta^2, the combined entry point must not regress below
     // the existing even-split protocol's own cost.
     #[test]
