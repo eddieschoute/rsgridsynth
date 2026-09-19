@@ -12,8 +12,10 @@
 //! the identity gate (zero T gates, valid whenever the identity alone doesn't already meet
 //! the target accuracy), and the *entire* budget is given to the other branch. For `theta`
 //! close to zero this collapses the mean T-count far below the angle-independent formula;
-//! for `theta` not small relative to the requested accuracy, [`synth_small_angle_or_mixed`]
-//! falls back to the existing even-split protocol, so there is no regression either way.
+//! for `theta` not small relative to the requested accuracy,
+//! [`crate::protocol::mixed_diagonal::synth_mixed_diagonal`] (which dispatches here via
+//! [`small_angle_could_help`]'s O(1) pre-check) falls back to the existing even-split
+//! protocol at zero added cost, so there is no regression either way.
 //!
 //! # Per-rotation scope
 //! Like every other synthesis entry point in this crate, everything here takes a single
@@ -31,7 +33,7 @@ use crate::gridsynth::{process_solution_candidate, setup_regions_and_transform, 
 use crate::gridsynth::{UnitDisk, UprightTransform};
 use crate::math::solve_quadratic;
 use crate::normal_form::{conjugate_by_clifford, Clifford};
-use crate::protocol::mixed_diagonal::{assemble_result, synth_mixed_diagonal, StraddleOutcome};
+use crate::protocol::mixed_diagonal::{assemble_result, StraddleOutcome};
 use crate::protocol::mixing::mixture_weight;
 use crate::protocol::MixedDiagonalResult;
 use crate::region::Ellipse;
@@ -524,24 +526,28 @@ pub fn synth_small_angle(
     Some(apply_x_conjugation(result, need_x_conjugate))
 }
 
-/// Recommended entry point: runs both [`synth_small_angle`] and
-/// [`crate::protocol::mixed_diagonal::synth_mixed_diagonal`] and keeps whichever has the
-/// lower expected T-count (Bothe Eq. (12)'s `T(theta, delta) = min(T_small-angle,
-/// T_mixed-diagonal)`), falling back to the even-split protocol outright if the small-angle
-/// search fails to find a candidate. This mirrors `crate::gridsynth::gridsynth_gates`'s own
-/// "run both `PhaseMode`s, keep the cheaper one" pattern, and guarantees this new path can
-/// never make a result *worse* than the existing protocol already gives.
-pub fn synth_small_angle_or_mixed(
-    theta: f64,
-    epsilon_diamond: f64,
-    seed: u64,
-    verbose: bool,
-) -> MixedDiagonalResult {
-    let mixed = synth_mixed_diagonal(theta, epsilon_diamond, seed, verbose);
-    match synth_small_angle(theta, epsilon_diamond, seed, verbose) {
-        Some(small) if small.expected_t_count() < mixed.expected_t_count() => small,
-        _ => mixed,
-    }
+/// Cheap, O(1), search-free pre-check: is it even *plausible* that pinning the identity as
+/// one branch could beat the even-split protocol for this `(theta, delta)`?
+///
+/// [`SmallAngleRegion`]'s own accuracy condition is only satisfiable (for the `x >= 0, y <=
+/// 0` branch this module searches) when its `A := delta - 2*sin(theta/2)^2` coefficient is
+/// positive -- below that, the region is degenerate (see the module docs on the `delta <=
+/// theta^2`-ish regime where the identity stops being the best under-rotation). Using the
+/// identity `2*sin(x/2)^2 = 1 - cos(x)`, and noting `cos` is even and `2*pi`-periodic (so
+/// this needs none of [`synth_small_angle`]'s own `theta` canonicalization to evaluate
+/// correctly), that condition is exactly `delta > 1 - theta.cos()`.
+///
+/// This is a **performance-only** heuristic, not a correctness gate: [`synth_mixed_diagonal`]
+/// (the caller) always falls back to the always-correct even-split search if this returns
+/// `true` but the small-angle search then fails to find anything, and both search paths
+/// independently guarantee meeting `delta` regardless of which one runs. Deliberately does
+/// *not* attempt to be more precise than this single closed-form check (e.g. by also running
+/// a cheap cost *estimate* for both paths and comparing) -- the whole point is to spend zero
+/// extra search cost decided which protocol to use.
+///
+/// [`synth_mixed_diagonal`]: crate::protocol::mixed_diagonal::synth_mixed_diagonal
+pub(crate) fn small_angle_could_help(theta: f64, delta: f64) -> bool {
+    delta > 1.0 - theta.cos()
 }
 
 #[cfg(test)]
@@ -672,12 +678,19 @@ mod tests {
     // Required regression: the mean T-count must be *dramatically* lower than the
     // angle-independent mixed-diagonal formula for a genuinely small angle -- this is the
     // entire point of the change. Uses the worked example from the design doc: theta=1e-3,
-    // delta=1e-4 (delta >> theta^2 = 1e-6).
+    // delta=1e-4 (delta >> theta^2 = 1e-6). Compares against `even_split_search` directly
+    // (the pure even-split protocol), NOT the now-dispatching `synth_mixed_diagonal` -- at
+    // this (theta, delta), `small_angle_could_help` is true, so `synth_mixed_diagonal` would
+    // just be this same small-angle result, making the comparison vacuous.
     #[test]
     fn small_angle_beats_mixed_diagonal_for_small_theta() {
         let theta = 1e-3;
         let delta = 1e-4;
-        let mixed = synth_mixed_diagonal(theta, delta, 7, false);
+        assert!(
+            small_angle_could_help(theta, delta),
+            "test premise: this (theta, delta) should be in the small-angle-eligible regime"
+        );
+        let mixed = crate::protocol::mixed_diagonal::even_split_search(theta, delta, 7, false);
         let small = synth_small_angle(theta, delta, 7, false).expect("expected a result");
         let mixed_cost = fbig_to_f64(&mixed.expected_t_count());
         let small_cost = fbig_to_f64(&small.expected_t_count());
@@ -764,20 +777,31 @@ mod tests {
         );
     }
 
-    // Regime switch: for delta << theta^2, the combined entry point must not regress below
-    // the existing even-split protocol's own cost.
+    // Regime switch: for delta << theta^2 (outside the small-angle-eligible regime), the
+    // dispatching `synth_mixed_diagonal` must behave *identically* to the pure even-split
+    // search -- the whole point of `small_angle_could_help`'s pre-check is to add zero cost
+    // and zero behavior change outside the regime where it can plausibly help.
     #[test]
-    fn combined_entry_point_never_worse_than_mixed_diagonal() {
+    fn dispatch_matches_even_split_outside_small_angle_regime() {
         let mut rng = StdRng::seed_from_u64(99);
         for _ in 0..3 {
             let theta: f64 = rng.random_range(0.3..2.0); // NOT small relative to typical delta
             let delta = 1e-6; // delta << theta^2 here
-            let mixed = synth_mixed_diagonal(theta, delta, 1, false);
-            let combined = synth_small_angle_or_mixed(theta, delta, 1, false);
             assert!(
-                fbig_to_f64(&combined.expected_t_count())
-                    <= fbig_to_f64(&mixed.expected_t_count()) + 1e-9,
-                "theta={theta}: combined entry point regressed vs. plain mixed-diagonal"
+                !small_angle_could_help(theta, delta),
+                "test premise: this (theta, delta) should be outside the small-angle regime"
+            );
+            let even_split =
+                crate::protocol::mixed_diagonal::even_split_search(theta, delta, 1, false);
+            let dispatched =
+                crate::protocol::mixed_diagonal::synth_mixed_diagonal(theta, delta, 1, false);
+            assert!(
+                (fbig_to_f64(&dispatched.expected_t_count())
+                    - fbig_to_f64(&even_split.expected_t_count()))
+                .abs()
+                    < 1e-9,
+                "theta={theta}: dispatching synth_mixed_diagonal should exactly match \
+                 even_split_search outside the small-angle regime"
             );
         }
     }

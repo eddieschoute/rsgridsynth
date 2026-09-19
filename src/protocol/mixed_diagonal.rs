@@ -624,6 +624,53 @@ pub(crate) fn assemble_result(
 /// Synthesizes a mixed-diagonal probabilistic-channel approximation of `R_z(theta)` to
 /// diamond-norm accuracy `epsilon_diamond`.
 ///
+/// Dispatches internally to whichever of the two mixed-diagonal search strategies this
+/// crate implements is likely cheaper, at the cost of **at most one** full region search --
+/// never both (see [`crate::protocol::small_angle::small_angle_could_help`] for the O(1)
+/// closed-form check that decides which). For an angle not small relative to
+/// `epsilon_diamond`, this behaves *exactly* as before (the even-split search below, now
+/// factored out as [`even_split_search`]): zero added cost. For an angle small enough that
+/// pinning the identity as one branch is plausible, this instead runs
+/// [`crate::protocol::small_angle::synth_small_angle`] and trusts its result outright,
+/// without also running the even-split search to double-check it picked the cheaper of the
+/// two -- see that function's own docs for why this can (rarely, near the `a ~= 0` regime
+/// boundary) return a result that costs a little more than the true optimum, though always
+/// one that still meets `epsilon_diamond`.
+///
+/// This is a **behavior change** from earlier versions of this function for small `theta`:
+/// the same `(theta, epsilon_diamond, seed)` can now produce a different (cheaper) gate
+/// sequence than before. Callers that need the original always-even-split behavior (e.g. to
+/// reproduce a specific benchmark) should call [`even_split_search`] directly.
+///
+/// # Panics
+/// Panics if the internal search exceeds its (very generous) bound on `k` without finding a
+/// solution; see [`search_for_straddling_pair`]. Not expected to trigger for any well-formed
+/// input.
+pub fn synth_mixed_diagonal(
+    theta: f64,
+    epsilon_diamond: f64,
+    seed: u64,
+    verbose: bool,
+) -> MixedDiagonalResult {
+    if crate::protocol::small_angle::small_angle_could_help(theta, epsilon_diamond) {
+        if let Some(result) =
+            crate::protocol::small_angle::synth_small_angle(theta, epsilon_diamond, seed, verbose)
+        {
+            return result;
+        }
+        // The small-angle search found nothing (not expected for a well-formed input that
+        // passed the pre-check) -- fall through to the always-correct even-split search.
+    }
+    even_split_search(theta, epsilon_diamond, seed, verbose)
+}
+
+/// The original mixed-diagonal search: splits the diamond-norm error budget *evenly*
+/// between an under- and an over-rotation (Kliuchnikov Prop. 3.13), giving the
+/// angle-*independent* `1.52*log2(1/epsilon) - 0.01` cost. [`synth_mixed_diagonal`] is now
+/// the recommended entry point (it dispatches here automatically for angles where this is
+/// the cheaper choice); call this directly only to bypass that dispatch, e.g. to reproduce a
+/// benchmark against the plain even-split protocol.
+///
 /// `epsilon_diamond` is converted to this crate's operator-norm-style `epsilon` convention
 /// (via [`diamond_to_spec_epsilon`]) before building the search region. Only exact-phase
 /// synthesis (`PhaseMode::Exact`) is implemented at this stage; `up_to_phase` mixing is out
@@ -633,7 +680,7 @@ pub(crate) fn assemble_result(
 /// Panics if the internal search exceeds its (very generous) bound on `k` without finding a
 /// solution; see [`search_for_straddling_pair`]. Not expected to trigger for any well-formed
 /// input.
-pub fn synth_mixed_diagonal(
+pub(crate) fn even_split_search(
     theta: f64,
     epsilon_diamond: f64,
     seed: u64,
