@@ -680,7 +680,7 @@ pub fn synth_mixed_diagonal(
 /// Panics if the internal search exceeds its (very generous) bound on `k` without finding a
 /// solution; see [`search_for_straddling_pair`]. Not expected to trigger for any well-formed
 /// input.
-pub(crate) fn even_split_search(
+pub fn even_split_search(
     theta: f64,
     epsilon_diamond: f64,
     seed: u64,
@@ -1123,13 +1123,25 @@ mod tests {
         let mw = mixture_weight(prec, (&re_lo, &im_lo), (&re_hi, &im_hi))
             .expect("mixture_weight should succeed for a real straddling pair");
 
-        // Cross-check the closed form directly: error == 2*(p*im_lo^2 + (1-p)*im_hi^2).
+        // Cross-check the closed form directly against Kliuchnikov Thm 3.12's general
+        // form, `error = 2*(1 - p*Re(lo)^2 - (1-p)*Re(hi)^2)`, NOT the `im^2`-only
+        // simplification (`error = 2*(p*Im(lo)^2 + (1-p)*Im(hi)^2)`) this test used before
+        // `mixture_weight` was fixed to handle `r != 1` candidates: that simplification
+        // additionally assumes `Re(w)^2 = 1 - Im(w)^2`, i.e. `r := |z| = 1` exactly, which a
+        // *real* solved candidate from a search only ever satisfies approximately. Measured
+        // directly for this (theta, epsilon) pair: `1 - Re(lo)^2 ~= 2.12e-7` versus `Im(lo)^2
+        // ~= 5.50e-8` -- the same order of magnitude, not a rounding-noise-level difference --
+        // so the old formula's approximation error was never actually negligible here, just
+        // small enough in absolute terms (well under epsilon) that it went unnoticed until
+        // `SmallAngleRegion` produced a candidate with `r` far enough from `1` to make the
+        // gap dramatic instead of subtle.
         let one = prec.ib(IBig::ONE);
         let two = to_fbig(prec, 2.0);
         let one_minus_p = &one - &mw.p;
-        let lo_term = &mw.p * (&im_lo * &im_lo);
-        let hi_term = &one_minus_p * (&im_hi * &im_hi);
-        let expected_error = &two * (&lo_term + &hi_term);
+        let re_lo_sq = &re_lo * &re_lo;
+        let re_hi_sq = &re_hi * &re_hi;
+        let deficit = &one - (&mw.p * &re_lo_sq) - (&one_minus_p * &re_hi_sq);
+        let expected_error = &two * &deficit;
         assert!(
             approx_eq(
                 &mw.projective_diamond_error,
