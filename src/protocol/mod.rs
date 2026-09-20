@@ -6,6 +6,7 @@ pub mod mixed_diagonal;
 pub mod mixed_fallback;
 pub mod mixing;
 pub mod small_angle;
+pub(crate) mod small_angle_table;
 
 pub use crate::accuracy::AchievedDiamondError;
 pub use mixing::{
@@ -14,7 +15,8 @@ pub use mixing::{
 };
 
 pub use mixed_diagonal::{
-    synth_mixed_diagonal, twirl_cliffords, MixedDiagonalRegion, MixedDiagonalResult,
+    even_split_search, synth_mixed_diagonal, twirl_cliffords, MixedDiagonalRegion,
+    MixedDiagonalResult,
 };
 
 pub use fallback::{exact_q, synth_fallback, FallbackResult, SectorRegion};
