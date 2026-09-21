@@ -61,9 +61,12 @@ existing `pub(crate)` visibility), and `AchievedDiamondError`.
 
 `theta = 1e-3`, `delta = 1e-4` (comfortably in `delta >> theta^2 = 1e-6`):
 - existing angle-independent mixed diagonal: `1.52*log2(1e4) - 0.01 ~= 20` T gates (mean)
-- measured (`small_angle_beats_mixed_diagonal_for_small_theta` test): mean T-count ~0.044,
-  vs. ~4.43 for `synth_mixed_diagonal` at the same `(theta, delta)` -- a ~100x reduction,
-  consistent with the paper's own two-orders-of-magnitude claims for this regime.
+- measured (`small_angle_beats_mixed_diagonal_for_small_theta` test): mean T-count ~0.10,
+  vs. ~4.43 for `synth_mixed_diagonal` at the same `(theta, delta)` -- a ~44x reduction,
+  consistent with the paper's own claims for this regime (the exact ratio moves as the
+  implementation changes -- e.g. removing the early-stop-after-first-hit optimization, see
+  simplification 4 below, changed it from an earlier ~100x -- but the qualitative win is
+  stable).
 
 ## Simplifications made relative to the papers (and why)
 
@@ -71,54 +74,82 @@ existing `pub(crate)` visibility), and `AchievedDiamondError`.
    area against average success probability to shave a lower-order term off the *asymptotic*
    T-count estimate; omitting it costs some efficiency in the very-small-`(theta, delta)`
    tail, never correctness. `SmallAngleRegion` always searches the full accuracy-limited area.
-2. **Bounding ellipse is the plain isotropic circle**, not Bothe's 5-point Khachiyan MVEE
-   construction. Per this crate's `Region` contract, `ellipse` may over-report without
-   affecting correctness -- only `to_upright` efficiency. `CandidateStats`
-   (`src/gridsynth.rs`) exists to measure this trade-off; it was not wired up in this change
-   (follow-up, if the simpler ellipse turns out costly in practice).
+2. **Bounding ellipse is an exact circular cap, not Bothe's 5-point Khachiyan MVEE
+   construction** (updated from an earlier, much looser "plain isotropic circle" -- see
+   `SmallAngleRegion`'s own doc comment for the `x_min` derivation and why it matters:
+   the full-disk version made the live lattice search pay the cost of searching the entire
+   disk on every call). Still not the tightest possible bound (Bothe's MVEE would be tighter
+   still), but a large, measured improvement over the original choice. `CandidateStats`
+   (`src/gridsynth.rs`) exists to measure any further gap; not wired up in this change.
 3. **`intersect`'s hyperbola clip over-approximates the non-convex (`q2 < 0`) branch** by
-   leaving the interval unclipped rather than computing the exact two-ray union. Same
-   justification as (2): `solve_tdgp` always re-checks `inside` on every candidate, so this
-   only costs efficiency, never correctness. This is the concern flagged (before this region
-   existed) in the local design doc's "Region::intersect convexity question" section.
-4. **Bounded-search scoring, not full enumeration.** Bothe explores "all solutions inside the
+   leaving the interval unclipped rather than computing the exact two-ray union. Per this
+   crate's `Region` contract, `intersect` may over-report without affecting correctness --
+   `solve_tdgp` always re-checks `inside` on every candidate, so this only costs efficiency.
+   This is the concern flagged (before this region existed) in the local design doc's
+   "Region::intersect convexity question" section.
+4. **Bounded-depth search, not full enumeration.** Bothe explores "all solutions inside the
    region up to a certain T count" and scores each by `p * T-count`; this implementation
-   scores every candidate found within a fixed window (`EXTRA_K_STEPS_AFTER_FIRST_HIT = 3`)
-   past the first hit, not an unbounded or T-count-targeted search. A tighter search
-   (targeting a specific T-count budget rather than a step count) is a possible future
-   refinement.
+   caps the search at `DEFAULT_MAX_LIVE_SEARCH_K` steps (default 8; callable with an explicit
+   override, or no cap at all, via `synth_small_angle_with_max_k`) rather than an unbounded or
+   T-count-targeted search, and -- unlike an earlier version of this change, which stopped
+   early a fixed number of steps after the first hit -- always explores the *entire*
+   `0..=max_k` range once started, since the cap is already tuned to a small, acceptable
+   latency bound and stopping early would only risk returning a worse candidate for no
+   latency benefit. A tighter search (targeting a specific T-count budget rather than a step
+   count) remains a possible future refinement.
 
-## Deferred (analysis only, not implemented)
+## Implemented beyond the original plan
 
-- **Bothe's exact lookup tables** (Tables I-III, up to T-count 35): a static, theta-independent
-  table that dominates the `delta >~ theta/500` regime with no synthesis at all. Cheap
-  follow-up; doubles as a correctness oracle for this region.
-- **Asymptotic cost formulas** (Eq. 10/11/63/66): closed-form T-count estimates for resource
-  estimation without running synthesis. Independent of everything here; worth doing only once
-  there's a named cost-model consumer.
-- **Quasi-probability mode**: buys nothing in T-count at equal `delta` for a single rotation
-  (per Appendix F); its real benefit is circuit-level (multiplicative rather than additive
-  sampling-overhead composition across many rotations), which is explicitly a caller's
-  concern, not this crate's (see `small_angle.rs`'s module doc on per-rotation scope).
-- **Fallback small-angle variant** (`delta -> 2*delta` substitution onto `synth_mixed_fallback`):
-  nearly free once this region exists; best value-per-effort follow-up of the four.
+The original version of this document deferred three of Bothe's techniques as "analysis
+only." One of them has since been implemented, because the live search above turned out to
+be too slow for practical use without it:
+
+- **Bothe's exact lookup table** (`src/protocol/small_angle_table.rs`): all 56 rows of
+  Tables II/III (theta-independent, up to T-count 35 -- 55 from the paper's original
+  publication, plus one, `tan(alpha)=1.32e-02`, supplied directly by the paper's authors
+  after we found it missing via a Table-II/Table-III cross-diff), transcribed from the
+  paper's own LaTeX source. `synth_small_angle` tries every row (via this crate's own exact
+  `mixture_weight`, not the paper's quasi-probability bookkeeping) before running the live
+  search, accepting a hit only if it beats a cheap even-split cost estimate. This resolves
+  the common case (roughly `delta` in the `1e-4`-`1e-6` range, for `theta` above the table's
+  own floor of ~1.93e-3 rad) near-instantly; the live search remains necessary for smaller
+  `theta` (below that floor, where no table row is ever close enough) and is the reason the
+  bounded-depth search above (simplification 4) exists at all. Still deferred, as analysis
+  only: the asymptotic cost formulas and quasi-probability mode, for the same reasons as
+  originally noted -- and now also the small-angle fallback variant, not revisited in this
+  round of work.
 
 ## Verification performed
 
 - `make ci` (fmt-check + clippy `-D warnings` + full test suite, `--all-features --all-targets`,
-  plus doc tests) is green with this change.
+  plus doc tests, including the pre-existing `protocol_accuracy_fuzz_test` fuzz suite) is
+  green.
 - Absolute correctness: every synthesized branch's achieved diamond-norm error is recomputed
   independently via `AchievedDiamondError` and checked against the requested `delta`
   (`synth_small_angle_finds_a_mixed_result_for_small_theta`,
   `negative_angle_achieves_its_own_target_after_x_conjugation`).
-- Regression guard: the combined entry point (`synth_small_angle_or_mixed`) never costs more
-  than the existing `synth_mixed_diagonal` alone
-  (`combined_entry_point_never_worse_than_mixed_diagonal`).
+- Regression guard: the dispatcher (`synth_mixed_diagonal`) never costs more than
+  `even_split_search` alone when `small_angle_could_help` says yes
+  (`small_angle_never_worse_than_even_split_when_pre_check_says_yes`).
 - Regime win: mean T-count is measurably lower than the angle-independent formula for small
-  `theta` (`small_angle_beats_mixed_diagonal_for_small_theta`).
+  `theta` (`small_angle_beats_mixed_diagonal_for_small_theta`), with a log-log slope fit
+  against Bothe's Eq. (66) power law (`small_angle_slope_fit_and_per_point_accuracy`).
 - Canonicalization: `theta` and `theta - 2*pi` (same channel) synthesize to the same T-count;
   negative `theta` round-trips correctly through the `X`-conjugation branch-swap fix (the one
-  real bug caught during implementation -- see `apply_x_conjugation`'s doc comment).
+  real bug this specific check caught during the original implementation -- see
+  `apply_x_conjugation`'s doc comment).
+- Search-depth cap: a case confirmed to exceed `DEFAULT_MAX_LIVE_SEARCH_K` falls back to
+  `even_split_search` within a bounded time and still meets its own budget
+  (`deep_search_falls_back_to_even_split_within_a_bounded_time`).
+- Table correctness: every row decodes to its stated T-count, the `Y`/`Z`-letter
+  substitutions are checked as direct algebraic identities (not just against the table), and
+  every row's decoded magnitude matches Table II's independently-transcribed value (see
+  `small_angle_table.rs`'s own test suite).
+- Two further, independent correctness bugs were found and fixed while making this feature
+  practically usable, not part of the original plan: `mixture_weight`'s closed form silently
+  assumed unit modulus (`src/protocol/mixing.rs`), and this in turn exposed a second bug in
+  `mixed_fallback`'s error accounting (`src/protocol/mixed_fallback.rs`) that had been masked
+  by the first. See the PR description for detail on both.
 
 ## Not implemented from the original plan
 
