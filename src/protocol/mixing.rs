@@ -39,18 +39,32 @@ pub struct MixtureWeight {
 }
 
 /// Closed-form classical mixture weight from the "mixed diagonal" protocol's mixing
-/// theorem (Kliuchnikov et al., arXiv:2203.10064v2). Given two straddling candidates for a
-/// single diagonal Z-rotation, expressed only through `w := u * e^{i theta/2}` (see
-/// [`WFrame`]), returns the probability `p` of using the "lo" branch that makes the
-/// first-order rotation error cancel exactly, together with the resulting (quadratically
-/// smaller) projective-step diamond-norm error.
+/// theorem (Kliuchnikov et al., arXiv:2203.10064v2, Thm 3.12). Given two straddling
+/// candidates for a single diagonal Z-rotation, expressed only through `w := u * e^{i
+/// theta/2}` (see [`WFrame`]), returns the probability `p` of using the "lo" branch that
+/// makes the first-order rotation error cancel exactly, together with the resulting
+/// (quadratically smaller) projective-step diamond-norm error.
 ///
-/// Closed form (using `q*sin(2*delta) = 2*Re(w)*Im(w)` and `q*sin(delta)^2 = Im(w)^2`,
-/// where `q = |u|^2` and `delta` is the argument of `w`):
+/// General closed form (valid for ANY `|u| <= 1`, i.e. candidates need not lie exactly on
+/// the unit circle):
 /// ```text
 /// p     = Re(w_hi)*Im(w_hi) / (Re(w_hi)*Im(w_hi) - Re(w_lo)*Im(w_lo))
-/// error = 2 * (p*Im(w_lo)^2 + (1-p)*Im(w_hi)^2)
+/// error = 2 * (1 - p*Re(w_lo)^2 - (1-p)*Re(w_hi)^2)
 /// ```
+/// `p`'s formula follows from `r^2*sin(2*delta) = 2*Re(w)*Im(w)` (true for any `r = |u|`,
+/// not just `r = 1`, since `Re(w) = r*cos(delta)`, `Im(w) = r*sin(delta)` by definition of
+/// polar form); the error formula is Thm 3.12's own `2*(1 - p*r_lo^2*cos^2(delta_lo) -
+/// (1-p)*r_hi^2*cos^2(delta_hi))`, using `r*cos(delta) = Re(w)` directly (again valid for
+/// any `r`). **Do not reduce this to `2*(p*Im(w_lo)^2 + (1-p)*Im(w_hi)^2)`** -- that
+/// simplification additionally substitutes `Re(w)^2 = 1 - Im(w)^2`, which requires `r = 1`
+/// exactly; every region in this crate other than
+/// [`crate::protocol::small_angle::SmallAngleRegion`] happens to only ever produce `r
+/// ~= 1` candidates (their search regions hug the boundary of the unit disk by
+/// construction), which is why that unsound simplification was originally shipped here and
+/// went undetected -- `SmallAngleRegion` does not hug the boundary, and a real candidate
+/// with `r` far from `1` exposed the bug (see git history for the concrete case: `r_lo^2 ~=
+/// 2e-7` gave a reported error of `~4e-7` from the old formula against a true error of
+/// `~2`, the worst possible value).
 ///
 /// # Precondition (caller's responsibility -- required, not enforced beyond a
 /// `debug_assert`)
@@ -63,11 +77,18 @@ pub struct MixtureWeight {
 /// rest of the crate settles on; this function only consumes the already-disambiguated
 /// `(Re(w), Im(w))` pairs.
 ///
-/// # Degenerate exact solutions
-/// If `Im(w_lo) == 0` or `Im(w_hi) == 0`, that branch IS an exact solution (zero rotation
-/// error): mixing is unnecessary, and evaluating the closed form directly would be `0/0`.
-/// In these cases this returns all the weight on the exact branch (`p = 1` or `p = 0`) with
-/// zero error, instead of dividing by zero.
+/// # Degenerate cases
+/// If `Im(w_lo) == 0` (or `Im(w_hi) == 0`) with the *other* branch's cross term nonzero,
+/// the general formula above already gives `p = 1` (or `p = 0`) automatically -- no special
+/// case needed, and (unlike the old, unsound shortcut) the resulting error is `2*(1 -
+/// Re(w)^2)`, correctly zero only when that branch is *also* unit modulus (a genuine exact
+/// solution), not merely angle-aligned.
+///
+/// If `Im(w_lo) == 0` AND `Im(w_hi) == 0` simultaneously, the closed form's denominator is
+/// `0/0`: there is no first-order (angular) offset left to cancel by mixing at all, so
+/// mixing cannot help: this returns the unmixed choice of whichever branch has the smaller
+/// magnitude-deficit residual (`p = 1` favoring `lo` if `Re(w_lo)^2 >= Re(w_hi)^2`, else `p
+/// = 0`).
 ///
 /// Returns `None` only when neither `Im(w)` is zero but the closed form's denominator is
 /// zero anyway -- a genuinely degenerate, ill-posed pair that callers should not construct
@@ -92,40 +113,46 @@ pub fn mixture_weight(
          over-rotation branch)"
     );
 
-    // Degenerate case: one branch is already an exact solution (zero rotation error), so
-    // mixing is unnecessary and the closed form below would divide 0/0.
-    if im_lo.is_zero() {
-        return Some(MixtureWeight {
-            p: prec.ib(IBig::ONE),
-            projective_diamond_error: zero,
-        });
-    }
-    if im_hi.is_zero() {
-        return Some(MixtureWeight {
-            p: zero.clone(),
-            projective_diamond_error: zero,
-        });
-    }
+    let one = prec.ib(IBig::ONE);
+    let two = prec.fb(FBig::try_from(2.0).unwrap());
 
     let hi_cross = re_hi * im_hi;
     let lo_cross = re_lo * im_lo;
     let denom = &hi_cross - &lo_cross;
+
     if denom.is_zero() {
-        // Neither branch is exact, yet the closed form is 0/0: a genuinely degenerate,
-        // ill-posed pair. Refuse to guess rather than divide by zero.
+        if im_lo.is_zero() && im_hi.is_zero() {
+            // No first-order offset left to cancel by mixing -- pick the unmixed branch
+            // with the smaller magnitude-deficit residual.
+            let re_lo_sq = re_lo * re_lo;
+            let re_hi_sq = re_hi * re_hi;
+            return Some(if re_lo_sq >= re_hi_sq {
+                let error = (&two * (&one - &re_lo_sq)).max(zero.clone());
+                MixtureWeight {
+                    p: one,
+                    projective_diamond_error: error,
+                }
+            } else {
+                let error = (&two * (&one - &re_hi_sq)).max(zero.clone());
+                MixtureWeight {
+                    p: zero,
+                    projective_diamond_error: error,
+                }
+            });
+        }
+        // Neither branch is angle-exact, yet the closed form is 0/0: a genuinely
+        // degenerate, ill-posed pair. Refuse to guess rather than divide by zero.
         return None;
     }
-    let p = &hi_cross / &denom;
 
-    let one = prec.ib(IBig::ONE);
+    let p = &hi_cross / &denom;
     let one_minus_p = &one - &p;
-    let im_lo_sq = im_lo * im_lo;
-    let im_hi_sq = im_hi * im_hi;
-    let lo_term = &p * &im_lo_sq;
-    let hi_term = &one_minus_p * &im_hi_sq;
-    let sum_terms = &lo_term + &hi_term;
-    let two = prec.fb(FBig::try_from(2.0).unwrap());
-    let projective_diamond_error = &two * &sum_terms;
+    let re_lo_sq = re_lo * re_lo;
+    let re_hi_sq = re_hi * re_hi;
+    let deficit = &one - (&p * &re_lo_sq) - (&one_minus_p * &re_hi_sq);
+    // Guard against tiny negative values from rounding error, same clamp pattern as
+    // `diagonal_diamond_distance`.
+    let projective_diamond_error = (&two * &deficit).max(zero);
 
     Some(MixtureWeight {
         p,

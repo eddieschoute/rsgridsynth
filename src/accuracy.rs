@@ -92,8 +92,15 @@ impl WFrame {
 
     /// `Im(w)` where `w = u * e^{i theta/2}`.
     pub fn im_w(&self, u: &DOmega) -> FBig<HalfEven> {
-        let term1 = &self.z_x * u.imag(self.prec);
-        let term2 = &self.z_y * u.real(self.prec);
+        self.im_w_fbig(u.real(self.prec), u.imag(self.prec))
+    }
+
+    /// `Im(w)` where `w = u * e^{i theta/2}`, for `u` already expressed as an `FBig` complex
+    /// pair rather than a `DOmega` -- see [`WFrame::re_w_fbig`]'s docs for why this exists
+    /// alongside the `DOmega`-taking [`WFrame::im_w`].
+    pub fn im_w_fbig(&self, re: &FBig<HalfEven>, im: &FBig<HalfEven>) -> FBig<HalfEven> {
+        let term1 = &self.z_x * im;
+        let term2 = &self.z_y * re;
         &term1 - &term2
     }
 }

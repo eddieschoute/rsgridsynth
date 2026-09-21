@@ -426,7 +426,7 @@ pub enum MixedDiagonalResult {
 
 impl MixedDiagonalResult {
     /// The working precision this result was synthesized at.
-    fn prec(&self) -> Prec {
+    pub(crate) fn prec(&self) -> Prec {
         match self {
             MixedDiagonalResult::Exact { prec, .. } => *prec,
             MixedDiagonalResult::Mixed { prec, .. } => *prec,
@@ -497,6 +497,24 @@ impl MixedDiagonalResult {
                 let hi_t = prec.ib(IBig::from(hi.t_count()));
                 (p * &lo_t) + (&one_minus_p * &hi_t)
             }
+        }
+    }
+
+    /// Worst-case T-count -- the T-count of whichever branch actually gets sampled, in the
+    /// unluckiest case. `Exact` is that one word's T-count (also the worst case, since it's
+    /// the only case). `Mixed` is `max(t_count(lo), t_count(hi))`, since a twirl preserves
+    /// T-count (same reasoning as `expected_t_count`).
+    ///
+    /// This matters alongside [`MixedDiagonalResult::expected_t_count`] specifically for the
+    /// small-angle protocol ([`crate::protocol::small_angle`]): pinning one branch to the
+    /// identity collapses the *mean* T-count, but the *searched* branch's own T-count is
+    /// often larger than the even-split protocol's would be (a larger, looser region costs
+    /// less on average only because it is used rarely) -- so a consumer that must reserve
+    /// worst-case resources (e.g. magic states) per rotation needs this, not just the mean.
+    pub fn max_t_count(&self) -> usize {
+        match self {
+            MixedDiagonalResult::Exact { gates, .. } => gates.t_count(),
+            MixedDiagonalResult::Mixed { lo, hi, .. } => lo.t_count().max(hi.t_count()),
         }
     }
 
@@ -606,6 +624,53 @@ pub(crate) fn assemble_result(
 /// Synthesizes a mixed-diagonal probabilistic-channel approximation of `R_z(theta)` to
 /// diamond-norm accuracy `epsilon_diamond`.
 ///
+/// Dispatches internally to whichever of the two mixed-diagonal search strategies this
+/// crate implements is likely cheaper, at the cost of **at most one** full region search --
+/// never both (see [`crate::protocol::small_angle::small_angle_could_help`] for the O(1)
+/// closed-form check that decides which). For an angle not small relative to
+/// `epsilon_diamond`, this behaves *exactly* as before (the even-split search below, now
+/// factored out as [`even_split_search`]): zero added cost. For an angle small enough that
+/// pinning the identity as one branch is plausible, this instead runs
+/// [`crate::protocol::small_angle::synth_small_angle`] and trusts its result outright,
+/// without also running the even-split search to double-check it picked the cheaper of the
+/// two -- see that function's own docs for why this can (rarely, near the `a ~= 0` regime
+/// boundary) return a result that costs a little more than the true optimum, though always
+/// one that still meets `epsilon_diamond`.
+///
+/// This is a **behavior change** from earlier versions of this function for small `theta`:
+/// the same `(theta, epsilon_diamond, seed)` can now produce a different (cheaper) gate
+/// sequence than before. Callers that need the original always-even-split behavior (e.g. to
+/// reproduce a specific benchmark) should call [`even_split_search`] directly.
+///
+/// # Panics
+/// Panics if the internal search exceeds its (very generous) bound on `k` without finding a
+/// solution; see [`search_for_straddling_pair`]. Not expected to trigger for any well-formed
+/// input.
+pub fn synth_mixed_diagonal(
+    theta: f64,
+    epsilon_diamond: f64,
+    seed: u64,
+    verbose: bool,
+) -> MixedDiagonalResult {
+    if crate::protocol::small_angle::small_angle_could_help(theta, epsilon_diamond) {
+        if let Some(result) =
+            crate::protocol::small_angle::synth_small_angle(theta, epsilon_diamond, seed, verbose)
+        {
+            return result;
+        }
+        // The small-angle search found nothing (not expected for a well-formed input that
+        // passed the pre-check) -- fall through to the always-correct even-split search.
+    }
+    even_split_search(theta, epsilon_diamond, seed, verbose)
+}
+
+/// The original mixed-diagonal search: splits the diamond-norm error budget *evenly*
+/// between an under- and an over-rotation (Kliuchnikov Prop. 3.13), giving the
+/// angle-*independent* `1.52*log2(1/epsilon) - 0.01` cost. [`synth_mixed_diagonal`] is now
+/// the recommended entry point (it dispatches here automatically for angles where this is
+/// the cheaper choice); call this directly only to bypass that dispatch, e.g. to reproduce a
+/// benchmark against the plain even-split protocol.
+///
 /// `epsilon_diamond` is converted to this crate's operator-norm-style `epsilon` convention
 /// (via [`diamond_to_spec_epsilon`]) before building the search region. Only exact-phase
 /// synthesis (`PhaseMode::Exact`) is implemented at this stage; `up_to_phase` mixing is out
@@ -615,7 +680,7 @@ pub(crate) fn assemble_result(
 /// Panics if the internal search exceeds its (very generous) bound on `k` without finding a
 /// solution; see [`search_for_straddling_pair`]. Not expected to trigger for any well-formed
 /// input.
-pub fn synth_mixed_diagonal(
+pub fn even_split_search(
     theta: f64,
     epsilon_diamond: f64,
     seed: u64,
@@ -988,8 +1053,8 @@ mod tests {
                     orig_t,
                     "twirl {c} changed T-count for side {side}"
                 );
-                let z = DOmegaUnitary::from_gates(&conjugated).to_complex_matrix(prec)[(0, 0)]
-                    .clone();
+                let z =
+                    DOmegaUnitary::from_gates(&conjugated).to_complex_matrix(prec)[(0, 0)].clone();
                 assert_eq!(
                     z, orig_z,
                     "twirl {c} changed the (0,0) entry for side {side}"
@@ -1058,13 +1123,25 @@ mod tests {
         let mw = mixture_weight(prec, (&re_lo, &im_lo), (&re_hi, &im_hi))
             .expect("mixture_weight should succeed for a real straddling pair");
 
-        // Cross-check the closed form directly: error == 2*(p*im_lo^2 + (1-p)*im_hi^2).
+        // Cross-check the closed form directly against Kliuchnikov Thm 3.12's general
+        // form, `error = 2*(1 - p*Re(lo)^2 - (1-p)*Re(hi)^2)`, NOT the `im^2`-only
+        // simplification (`error = 2*(p*Im(lo)^2 + (1-p)*Im(hi)^2)`) this test used before
+        // `mixture_weight` was fixed to handle `r != 1` candidates: that simplification
+        // additionally assumes `Re(w)^2 = 1 - Im(w)^2`, i.e. `r := |z| = 1` exactly, which a
+        // *real* solved candidate from a search only ever satisfies approximately. Measured
+        // directly for this (theta, epsilon) pair: `1 - Re(lo)^2 ~= 2.12e-7` versus `Im(lo)^2
+        // ~= 5.50e-8` -- the same order of magnitude, not a rounding-noise-level difference --
+        // so the old formula's approximation error was never actually negligible here, just
+        // small enough in absolute terms (well under epsilon) that it went unnoticed until
+        // `SmallAngleRegion` produced a candidate with `r` far enough from `1` to make the
+        // gap dramatic instead of subtle.
         let one = prec.ib(IBig::ONE);
         let two = to_fbig(prec, 2.0);
         let one_minus_p = &one - &mw.p;
-        let lo_term = &mw.p * (&im_lo * &im_lo);
-        let hi_term = &one_minus_p * (&im_hi * &im_hi);
-        let expected_error = &two * (&lo_term + &hi_term);
+        let re_lo_sq = &re_lo * &re_lo;
+        let re_hi_sq = &re_hi * &re_hi;
+        let deficit = &one - (&mw.p * &re_lo_sq) - (&one_minus_p * &re_hi_sq);
+        let expected_error = &two * &deficit;
         assert!(
             approx_eq(
                 &mw.projective_diamond_error,

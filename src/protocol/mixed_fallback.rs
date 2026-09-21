@@ -181,6 +181,24 @@ impl AchievedDiamondError for MixedFallbackResult {
     /// `p`/`1-p` selection *and* that side's own failure probability
     /// `1 - achieved_success_probability()`.
     ///
+    /// The projective-mixture term feeds `mixture_weight` the *phase-normalized* `z/|z|` of
+    /// each side's projective candidate, not the raw decoded `z` -- exactly the same
+    /// normalization [`achieved_phase_diamond_error`] already applies for a single fallback
+    /// candidate, and for the same reason (see its own doc comment): a fallback projective
+    /// candidate's `z` deliberately has `|z|^2 = q < 1` (the *separate* measurement-failure
+    /// probability, already accounted for below via `lo_fail_prob`/`hi_fail_prob`), not a
+    /// magnitude deficit that represents angular error. `mixture_weight`'s general (any-`r`)
+    /// closed form -- correct and necessary for callers like
+    /// [`crate::protocol::small_angle::SmallAngleRegion`] whose candidates genuinely can have
+    /// `r < 1` as real rotation-approximation error -- would otherwise attribute fallback's
+    /// `q < 1` to angular error too, double-counting it against the already-separate failure
+    /// terms and wildly overstating the projective-mixture term (confirmed directly: this
+    /// bug was masked for years by mixture_weight's own former unsound `r = 1`-assuming
+    /// shortcut, which happened to produce a small -- if for the wrong reason -- projective
+    /// term regardless of the true `q`, and was only exposed once that shortcut was fixed to
+    /// the general formula and this conflation started reporting the true, much larger
+    /// value).
+    ///
     /// For the `Exact` variant: this only guarantees the returned gates are an exact ring
     /// unitary (no off-diagonal synthesis error) that already passed the region's tolerance
     /// check -- NOT that its phase exactly equals `theta` (see the analogous fix in
@@ -198,10 +216,18 @@ impl AchievedDiamondError for MixedFallbackResult {
                 let wframe = WFrame::new(prec, theta);
                 let lo_u = DOmegaUnitary::from_gates(&lo.projective_gates);
                 let hi_u = DOmegaUnitary::from_gates(&hi.projective_gates);
-                let re_lo = wframe.re_w(lo_u.z());
-                let im_lo = wframe.im_w(lo_u.z());
-                let re_hi = wframe.re_w(hi_u.z());
-                let im_hi = wframe.im_w(hi_u.z());
+                let normalize = |z: &crate::ring::DOmega| -> (FBig<HalfEven>, FBig<HalfEven>) {
+                    let re = z.real(prec);
+                    let im = z.imag(prec);
+                    let norm = ((re * re) + (im * im)).sqrt();
+                    (re / &norm, im / &norm)
+                };
+                let (lo_re_n, lo_im_n) = normalize(lo_u.z());
+                let (hi_re_n, hi_im_n) = normalize(hi_u.z());
+                let re_lo = wframe.re_w_fbig(&lo_re_n, &lo_im_n);
+                let im_lo = wframe.im_w_fbig(&lo_re_n, &lo_im_n);
+                let re_hi = wframe.re_w_fbig(&hi_re_n, &hi_im_n);
+                let im_hi = wframe.im_w_fbig(&hi_re_n, &hi_im_n);
                 let projective_term = mixture_weight(prec, (&re_lo, &im_lo), (&re_hi, &im_hi))
                     .expect("a real assembled Mixed result must yield a valid mixture")
                     .projective_diamond_error;
