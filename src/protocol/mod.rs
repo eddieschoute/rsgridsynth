@@ -23,4 +23,4 @@ pub use fallback::{exact_q, synth_fallback, FallbackResult, SectorRegion};
 
 pub use mixed_fallback::{synth_mixed_fallback, MixedFallbackResult, MixedFallbackSide};
 
-pub use small_angle::{synth_small_angle, SmallAngleRegion};
+pub use small_angle::{synth_small_angle, synth_small_angle_with_max_k, SmallAngleRegion};

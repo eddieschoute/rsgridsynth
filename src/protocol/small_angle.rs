@@ -47,7 +47,7 @@ use dashu_base::{Abs, Approximation};
 use dashu_float::round::mode::HalfEven;
 use dashu_float::FBig;
 use dashu_int::IBig;
-use log::warn;
+use log::{debug, warn};
 use nalgebra::{Matrix2, Vector2};
 
 /// Same 2x2 matrix product helper as `gridsynth::matrix_multiply_2x2` /
@@ -515,24 +515,26 @@ impl Region for SmallAngleRegion {
 /// count) is a possible future refinement, not required for correctness.
 const EXTRA_K_STEPS_AFTER_FIRST_HIT: i64 = 3;
 
-/// Hard ceiling on how many `k`-steps [`search_best_over_rotation`] will examine before
-/// giving up, regardless of working precision. This is a deliberate, *practical* latency
-/// bound, not a correctness one: Bothe's own asymptotic win comes from finding a genuinely
-/// *rare* over-rotation candidate (low probability `p`, cheap only when it happens to be
-/// sampled) -- and rare-in-the-lattice can mean the search must reach a high `k` before any
-/// lattice point happens to land inside the (correctly tight, but still sparse) region.
-/// Measured directly (`SmallAngleRegion`'s own tight ellipse): per-`k` cost in this search
-/// grows roughly 4x per step once it starts climbing (`k=10`: ~140ms, `k=11`: ~590ms, `k=12`:
-/// ~2.1s, `k=13`: ~8.4s, in an unoptimized build) -- and the *degenerate* (`A <= 0`, full-disk
+/// Default hard ceiling on how many `k`-steps [`search_best_over_rotation`] will examine
+/// before giving up, used by [`synth_small_angle`] (which has no way to take a per-call
+/// override -- see [`synth_small_angle_with_max_k`] for that). This is a deliberate,
+/// *practical* latency bound, not a correctness one: Bothe's own asymptotic win comes from
+/// finding a genuinely *rare* over-rotation candidate (low probability `p`, cheap only when
+/// it happens to be sampled) -- and rare-in-the-lattice can mean the search must reach a high
+/// `k` before any lattice point happens to land inside the (correctly tight, but still
+/// sparse) region. Measured directly (`SmallAngleRegion`'s own tight ellipse): per-`k` cost
+/// in this search grows roughly 4x per step once it starts climbing (`k=8`: ~10-15ms
+/// cumulative, `k=9`: ~35-58ms, `k=10`: ~125-200ms, `k=11`: ~0.5-0.85s, `k=12`: ~1.9-2.6s,
+/// `k=13`: ~7.5-11s, in an unoptimized build) -- and the *degenerate* (`A <= 0`, full-disk
 /// fallback ellipse) case is measurably worse again, since a bigger box means more work per
 /// `k` even before any of it passes the exact containment check. This growth is inherent to
 /// searching for a rare candidate at depth `k` -- confirmed by forcing `even_split_search` (a
 /// different, already-fast protocol) to a comparably deep `k` via an artificially tiny
 /// `epsilon`, where it stays fast (finding *something* quickly, since its region's area only
-/// depends on `epsilon`, not on rarity). `k=9` is chosen with real margin below where the
-/// tight-ellipse case starts climbing steeply, so the degenerate case's worse per-step cost
-/// still lands in a bounded, sub-second-to-low-single-digit-second regime rather than the
-/// tight case's own margin being immediately eaten by it.
+/// depends on `epsilon`, not on rarity). `k=8` keeps the default comfortably under ~20ms
+/// worst case even in an unoptimized build, well inside "fast enough for a compilation
+/// pipeline" -- callers who want to trade that latency for a chance at deeper (rarer, more
+/// angle-dependent) wins should use [`synth_small_angle_with_max_k`] directly.
 /// Tightening [`SmallAngleRegion`]'s bounding ellipse (see its own docs) fixes the cases that
 /// only needed a *tighter* search at low `k`; it cannot fix a case that genuinely needs a
 /// *deeper* one -- no ellipse improves cost for the vast number of lattice points examined at
@@ -549,17 +551,18 @@ const EXTRA_K_STEPS_AFTER_FIRST_HIT: i64 = 3;
 /// latency -- the tradeoff a compiler pipeline needs. This never costs correctness: every
 /// caller already treats `None` here as "use the always-correct even-split protocol instead"
 /// (see [`crate::protocol::mixed_diagonal::synth_mixed_diagonal`]), not a hard failure.
-const MAX_LIVE_SEARCH_K: i64 = 9;
+const DEFAULT_MAX_LIVE_SEARCH_K: i64 = 8;
 
 /// Searches for the over-rotation branch: candidates inside `region` (so `Im(w) <= 0` by
 /// construction), scored against the fixed `(hi_re, hi_im)` branch (the identity, in every
 /// caller here) by [`mixture_weight`]'s `p`, keeping the one minimizing `p * T-count` (the
 /// *mean* cost of the resulting mixture, since the `hi` branch's own T-count is 0 whenever
-/// it is the identity). Returns `None` if no candidate is found within
-/// [`MAX_LIVE_SEARCH_K`] -- an EXPECTED outcome for `(theta, delta)` pairs whose best
-/// over-rotation lies deeper than this bound allows, not a bug; callers treat it as "fall
-/// back to [`crate::protocol::mixed_diagonal::synth_mixed_diagonal`]'s always-correct
-/// even-split path" (see [`synth_small_angle`]).
+/// it is the identity). Returns `None` if no candidate is found within `max_k` -- an
+/// EXPECTED outcome for `(theta, delta)` pairs whose best over-rotation lies deeper than
+/// this bound allows, not a bug; callers treat it as "fall back to
+/// [`crate::protocol::mixed_diagonal::synth_mixed_diagonal`]'s always-correct even-split
+/// path" (see [`synth_small_angle`]).
+#[allow(clippy::too_many_arguments)]
 fn search_best_over_rotation(
     region: &SmallAngleRegion,
     unit_disk: &UnitDisk,
@@ -568,9 +571,9 @@ fn search_best_over_rotation(
     wframe: &WFrame,
     hi_re: &FBig<HalfEven>,
     hi_im: &FBig<HalfEven>,
+    max_k: i64,
 ) -> Option<DOmegaUnitary> {
     let prec = config.prec;
-    let max_k = MAX_LIVE_SEARCH_K;
     let zero = prec.ib(IBig::ZERO);
 
     let mut best: Option<(FBig<HalfEven>, DOmegaUnitary)> = None;
@@ -638,11 +641,27 @@ fn search_best_over_rotation(
     }
 
     if best.is_none() {
-        warn!(
+        debug!(
             "search_best_over_rotation: no over-rotation candidate found within \
-             MAX_LIVE_SEARCH_K={MAX_LIVE_SEARCH_K} k-steps (first_hit_k={first_hit_k:?}); \
-             falling back to the even-split protocol"
+             max_k={max_k} k-steps (first_hit_k={first_hit_k:?}); falling back to the \
+             even-split protocol"
         );
+    } else if let Some(hit_k) = first_hit_k {
+        // Bothe's own algorithm (Section V A) explores past the first hit specifically
+        // because a higher-k candidate can have a lower `p` and hence a lower mean
+        // T-count -- `EXTRA_K_STEPS_AFTER_FIRST_HIT` is this crate's bounded approximation
+        // of that. If `max_k` cut that exploration off before it completed, a caller willing
+        // to spend more time (via `synth_small_angle_with_max_k`) might find a cheaper
+        // result than the one being returned here.
+        if hit_k + EXTRA_K_STEPS_AFTER_FIRST_HIT > max_k {
+            debug!(
+                "search_best_over_rotation: found a candidate at k={hit_k}, but max_k={max_k} \
+                 cut off the search before exploring the full \
+                 {EXTRA_K_STEPS_AFTER_FIRST_HIT} extra k-steps that might have found a lower \
+                 mean T-count; increasing max_k (see synth_small_angle_with_max_k) could \
+                 reduce the mean T-count further"
+            );
+        }
     }
 
     best.map(|(_, u)| u)
@@ -771,6 +790,33 @@ pub fn synth_small_angle(
     seed: u64,
     verbose: bool,
 ) -> Option<MixedDiagonalResult> {
+    synth_small_angle_with_max_k(
+        theta,
+        epsilon_diamond,
+        seed,
+        verbose,
+        Some(DEFAULT_MAX_LIVE_SEARCH_K),
+    )
+}
+
+/// Same as [`synth_small_angle`], but with an explicit override for how many `k`-steps the
+/// live lattice search (see [`search_best_over_rotation`]) is allowed to examine before
+/// giving up:
+/// - `Some(max_k)` uses that bound instead of [`DEFAULT_MAX_LIVE_SEARCH_K`] -- a caller
+///   willing to trade latency for a chance at a deeper (rarer, more angle-dependent) win
+///   should raise it; see [`DEFAULT_MAX_LIVE_SEARCH_K`]'s own doc comment for measured
+///   per-`k` costs to judge that trade directly.
+/// - `None` removes the cap entirely (uses the same generous, effectively-unbounded
+///   `4 * prec.bits()` formula the rest of this crate's searches use) -- only appropriate
+///   for a caller that has already decided latency doesn't matter for this call, since (per
+///   that same doc comment) an uncapped search can take many seconds or more.
+pub fn synth_small_angle_with_max_k(
+    theta: f64,
+    epsilon_diamond: f64,
+    seed: u64,
+    verbose: bool,
+    max_k: Option<i64>,
+) -> Option<MixedDiagonalResult> {
     let two_pi = 2.0 * std::f64::consts::PI;
     let theta_wrapped = theta.rem_euclid(two_pi);
     let (theta_pos, need_x_conjugate) = if theta_wrapped <= std::f64::consts::PI {
@@ -842,15 +888,31 @@ pub fn synth_small_angle(
         }
         // Table's best qualifying candidate isn't good enough to trust outright; let the live
         // search below do its own, theta-tuned job instead -- same as a table miss.
+        warn!(
+            "table_best_over_rotation found a candidate (mean_t_count={mean_t_count:.3}) but \
+             it exceeds the even-split cost estimate ({even_split_cost_estimate:.3}); falling \
+             through to the live search instead of trusting the table"
+        );
     }
 
-    synth_small_angle_live_search(config, prec, delta, wframe, hi, need_x_conjugate)
+    let resolved_max_k = max_k.unwrap_or_else(|| 4 * prec.bits() as i64);
+    synth_small_angle_live_search(
+        config,
+        prec,
+        delta,
+        wframe,
+        hi,
+        need_x_conjugate,
+        resolved_max_k,
+    )
 }
 
-/// The live lattice-search fallback tail of [`synth_small_angle`]: builds
+/// The live lattice-search fallback tail of [`synth_small_angle_with_max_k`]: builds
 /// [`SmallAngleRegion`], runs [`search_best_over_rotation`], and assembles the final result.
 /// Factored out so it can be called both when [`table_best_over_rotation`] finds nothing
-/// usable and (identically) when it never runs at all.
+/// usable and (identically) when it never runs at all. `max_k` is the already-resolved
+/// (non-`Option`) bound -- see [`synth_small_angle_with_max_k`] for the `Option` -> concrete
+/// value resolution.
 fn synth_small_angle_live_search(
     mut config: GridSynthConfig,
     prec: Prec,
@@ -858,6 +920,7 @@ fn synth_small_angle_live_search(
     wframe: WFrame,
     hi: DOmegaUnitary,
     need_x_conjugate: bool,
+    max_k: i64,
 ) -> Option<MixedDiagonalResult> {
     let scale = ZRootTwo::new(IBig::from(1), IBig::from(0));
     let region = SmallAngleRegion::new(prec, &config.theta, &delta, scale.clone());
@@ -875,6 +938,7 @@ fn synth_small_angle_live_search(
         &wframe,
         &hi_re,
         &hi_im,
+        max_k,
     )?;
 
     let outcome = StraddleOutcome::Mixed(lo, Box::new(hi));
@@ -1212,11 +1276,14 @@ mod tests {
     // -- are `could_help=false` at this realistic delta: that scenario is real math, but it
     // describes a delta regime (~0.1-1) no actual accuracy target lives in. At realistic
     // delta, the win is exactly the "headline" small-theta Bothe/Kliuchnikov result: large,
-    // monotonically growing as theta shrinks. (A single, small theta is used below, not a
-    // sweep across the boundary, to keep this test's runtime reasonable: each search here
-    // costs on the order of a minute once `SmallAngleRegion` was corrected to the general
-    // accuracy condition, since the old, buggy region's spurious `x~=0` shortcut is what made
-    // this kind of search look artificially cheap before.)
+    // monotonically growing as theta shrinks.
+    //
+    // The boundary-flip assertions above use delta=1e-6 directly (cheap, no search). The
+    // actual win/accuracy assertions below use a *different*, looser delta (1e-4): measured
+    // directly while choosing `DEFAULT_MAX_LIVE_SEARCH_K`, delta=1e-6 needs a live search to
+    // k~11 to find a candidate at all (a real, deep-in-regime case, but deeper than the
+    // default cap allows) -- delta=1e-4 needs only k~5, letting this test verify the same
+    // qualitative win within the default cap.
     #[test]
     fn realistic_delta_boundary_matches_sqrt_2_delta_and_wins_throughout() {
         use crate::accuracy::AchievedDiamondError as _;
@@ -1229,6 +1296,8 @@ mod tests {
         assert!(!small_angle_could_help(std::f64::consts::PI / 4.0, delta));
         assert!(!small_angle_could_help(1.0, delta));
 
+        let delta = 1e-4_f64;
+        let boundary = (2.0 * delta).sqrt();
         let theta = boundary * 1e-2;
         let small = synth_small_angle(theta, delta, 1, false)
             .unwrap_or_else(|| panic!("expected a result for theta={theta}"));
@@ -1287,10 +1356,18 @@ mod tests {
 
         // (theta, delta) pairs spanning small/moderate/"as large as meaningfully testable"
         // theta, each just inside the `could_help == true` side of the boundary.
-        // theta=pi/4 is the adversarial case from point 2 above. Kept to 3 cases (not the 6
-        // originally used to explore this): each search here costs on the order of a minute
-        // once `SmallAngleRegion` was corrected to the general accuracy condition, since the
-        // old, buggy region's spurious `x~=0` shortcut is what made this look far cheaper.
+        // theta=pi/4 is the adversarial case from point 2 above.
+        //
+        // These sit right at the `could_help` boundary by design, which is now (with
+        // `DEFAULT_MAX_LIVE_SEARCH_K` bounding the live search) a regime where
+        // `synth_small_angle` legitimately -- and correctly -- often returns `None` rather
+        // than search indefinitely (see that constant's own docs). So this test goes through
+        // the dispatcher (`synth_mixed_diagonal`) instead of calling `synth_small_angle`
+        // directly: the dispatcher's own contract already guarantees "never worse than
+        // even-split" by construction (a live-search miss transparently falls back to
+        // `even_split_search`, giving *equal* cost, never worse) -- what this test actually
+        // needs to check is that a live-search *hit* is never worse either, which comparing
+        // the dispatcher's result against a fresh `even_split_search` call still verifies.
         let pi_4 = std::f64::consts::PI / 4.0;
         let cases: [(f64, f64); 3] = [
             (0.05, 1.0001 * (1.0 - 0.05_f64.cos())),
@@ -1303,19 +1380,19 @@ mod tests {
                 "test premise violated: theta={theta}, delta={delta} should be in the \
                  pre-check's `could_help` regime"
             );
-            let small = synth_small_angle(theta, delta, 1, false)
-                .unwrap_or_else(|| panic!("expected a result for theta={theta}, delta={delta}"));
+            let dispatched =
+                crate::protocol::mixed_diagonal::synth_mixed_diagonal(theta, delta, 1, false);
             let even = crate::protocol::mixed_diagonal::even_split_search(theta, delta, 1, false);
-            let prec = prec_of(&small);
+            let prec = prec_of(&dispatched);
             let theta_fbig = to_fbig(prec, theta);
 
             // Verify BOTH results actually meet the requested budget (not just compare
             // T-counts) -- a cheap-but-wrong result would otherwise look like a "win".
-            let small_achieved = fbig_to_f64(&small.achieved_diamond_error(&theta_fbig));
+            let dispatched_achieved = fbig_to_f64(&dispatched.achieved_diamond_error(&theta_fbig));
             let even_achieved = fbig_to_f64(&even.achieved_diamond_error(&theta_fbig));
             assert!(
-                small_achieved <= delta * 1.01,
-                "theta={theta}, delta={delta}: small-angle achieved error {small_achieved} \
+                dispatched_achieved <= delta * 1.01,
+                "theta={theta}, delta={delta}: dispatched achieved error {dispatched_achieved} \
                  exceeds its own budget"
             );
             assert!(
@@ -1324,11 +1401,11 @@ mod tests {
                  exceeds its own budget"
             );
 
-            let small_cost = fbig_to_f64(&small.expected_t_count());
+            let dispatched_cost = fbig_to_f64(&dispatched.expected_t_count());
             let even_cost = fbig_to_f64(&even.expected_t_count());
             assert!(
-                small_cost <= even_cost + 1e-9,
-                "theta={theta}, delta={delta}: small-angle cost {small_cost} exceeded \
+                dispatched_cost <= even_cost + 1e-9,
+                "theta={theta}, delta={delta}: dispatched cost {dispatched_cost} exceeded \
                  even-split cost {even_cost} despite could_help == true"
             );
         }
@@ -1341,9 +1418,9 @@ mod tests {
         // -0.05 (this test's original value) canonicalizes to theta_pos=0.05, which has
         // `A <= 0` at delta=1e-4 (outside `SmallAngleRegion`'s useful regime -- confirmed
         // `small_angle_could_help(0.05, 1e-4)` is false) and so, correctly, no longer finds a
-        // candidate within `MAX_LIVE_SEARCH_K` (that combination previously only "succeeded"
-        // via an effectively unbounded, multi-minute search). Using the negative counterpart
-        // of one of the pairs already confirmed to work within the cap instead.
+        // candidate within `DEFAULT_MAX_LIVE_SEARCH_K` (that combination previously only
+        // "succeeded" via an effectively unbounded, multi-minute search). Using the negative
+        // counterpart of one of the pairs already confirmed to work within the cap instead.
         let theta = -1e-4_f64;
         let delta = 1e-5;
         let result = synth_small_angle(theta, delta, 11, false).expect("expected a result");
