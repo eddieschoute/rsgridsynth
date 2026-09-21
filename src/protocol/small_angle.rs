@@ -506,14 +506,12 @@ impl Region for SmallAngleRegion {
     }
 }
 
-/// How many extra `k`-steps [`search_best_over_rotation`] explores past the first solvable
-/// candidate, looking for one with a lower `p * T-count` score. Bothe's own observation
-/// (Section V A) motivates this: "we must explore higher T count than that of the first
-/// unitary found, as higher T count sequences might lead to lower `p` and overall lower
-/// average T count." A small fixed bound rather than an unbounded search, so this stays
-/// linear in cost -- a fuller optimum (bounding by a target T-count rather than a step
-/// count) is a possible future refinement, not required for correctness.
-const EXTRA_K_STEPS_AFTER_FIRST_HIT: i64 = 3;
+/// How close to `max_k` the best candidate's own `first_hit_k` has to be for
+/// [`search_best_over_rotation`] to flag (via `debug!`) that a larger `max_k` might still
+/// find something better. Purely a heuristic threshold for that log message -- since the
+/// search always runs the full `0..=max_k` range regardless (see that function's own docs on
+/// why there is no early-stop), this has no effect on what candidate is actually returned.
+const LATE_HIT_DEBUG_MARGIN: i64 = 3;
 
 /// Default hard ceiling on how many `k`-steps [`search_best_over_rotation`] will examine
 /// before giving up, used by [`synth_small_angle`] (which has no way to take a per-call
@@ -562,6 +560,13 @@ const DEFAULT_MAX_LIVE_SEARCH_K: i64 = 8;
 /// this bound allows, not a bug; callers treat it as "fall back to
 /// [`crate::protocol::mixed_diagonal::synth_mixed_diagonal`]'s always-correct even-split
 /// path" (see [`synth_small_angle`]).
+///
+/// Always examines the *entire* `0..=max_k` range, even after finding a candidate: Bothe's
+/// own algorithm (Section V A) explores past the first hit deliberately, "as higher T count
+/// sequences might lead to lower `p` and overall lower average T count," and since `max_k`
+/// is already tuned to a small, acceptable latency bound (see [`DEFAULT_MAX_LIVE_SEARCH_K`]),
+/// there is little to gain from also short-circuiting once a candidate is found -- doing so
+/// would only risk returning a worse candidate than the budget already paid for.
 #[allow(clippy::too_many_arguments)]
 fn search_best_over_rotation(
     region: &SmallAngleRegion,
@@ -581,12 +586,6 @@ fn search_best_over_rotation(
     let mut k = 0;
 
     while k <= max_k {
-        if let Some(hit_k) = first_hit_k {
-            if k > hit_k + EXTRA_K_STEPS_AFTER_FIRST_HIT {
-                break;
-            }
-        }
-
         if let Some(solutions) = solve_tdgp(
             region,
             unit_disk,
@@ -647,19 +646,15 @@ fn search_best_over_rotation(
              even-split protocol"
         );
     } else if let Some(hit_k) = first_hit_k {
-        // Bothe's own algorithm (Section V A) explores past the first hit specifically
-        // because a higher-k candidate can have a lower `p` and hence a lower mean
-        // T-count -- `EXTRA_K_STEPS_AFTER_FIRST_HIT` is this crate's bounded approximation
-        // of that. If `max_k` cut that exploration off before it completed, a caller willing
-        // to spend more time (via `synth_small_angle_with_max_k`) might find a cheaper
-        // result than the one being returned here.
-        if hit_k + EXTRA_K_STEPS_AFTER_FIRST_HIT > max_k {
+        // The search already ran the full `0..=max_k` range (see this function's own docs),
+        // so this isn't "we stopped early" -- it's a heuristic signal that the best
+        // candidate found sits close to the edge of the budget actually explored, so a
+        // *larger* max_k (not explored at all here) might still find something better.
+        if hit_k + LATE_HIT_DEBUG_MARGIN > max_k {
             debug!(
-                "search_best_over_rotation: found a candidate at k={hit_k}, but max_k={max_k} \
-                 cut off the search before exploring the full \
-                 {EXTRA_K_STEPS_AFTER_FIRST_HIT} extra k-steps that might have found a lower \
-                 mean T-count; increasing max_k (see synth_small_angle_with_max_k) could \
-                 reduce the mean T-count further"
+                "search_best_over_rotation: best candidate found at k={hit_k}, close to \
+                 max_k={max_k}; increasing max_k (see synth_small_angle_with_max_k) might \
+                 find a lower mean T-count"
             );
         }
     }
