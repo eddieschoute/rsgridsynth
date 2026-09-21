@@ -93,6 +93,7 @@ pub(crate) const OVER_ROTATION_TABLE: &[(f64, usize, &str)] = &[
     (2.02e-02, 26, "IHTHTHTHTHTHTHTSHTSHTHTSHTSHTHTSHTSHTSHTHTHTSHTSHTHTHTHTSHTHTHTSX"),
     (1.64e-02, 22, "THTHTHTSHTHTHTSHTHTHTSHTHTHTHTSHTHTHTSHTHTHTSHTHTHSSS"),
     (1.33e-02, 23, "TSHTHTSHTHTHTHTHTSHTSHTHTSHTSHTSHTSHTHTSHTSHTHTHTHTHTSHTHSSS"),
+    (1.32e-02, 28, "TSHTHTHTSHTSHTSHTSHTHTHTHTHTHTSHTSHTSHTHTHTHTSHTSHTHTSHTHTSHTHTHTHTSHSX"),
     (1.17e-02, 26, "THTHTSHTSHTSHTSHTSHTHTHTSHTHTSHTSHTHTHTHTHTSHTHTHTHTSHTHTHTHTHSXSSWW"),
     (1.16e-02, 28, "ISHTHTHTSHTHTSHTHTHTSHTHTHTSHTHTSHTSHTHTSHTSHTHTHTSHTHTHTSHTHTHTHTSHTHSX"),
     (1.01e-02, 27, "ISHTHTSHTHTSHTHTSHTHTHTSHTHTHTSHTSHTHTHTSHTSHTHTSHTHTHTSHTHTHTHTHTSHX"),
@@ -165,13 +166,9 @@ const TABLE_II_ONE_MINUS_R_PHI: &[(f64, f64)] = &[
     (2.85e-06, 2.13e-02),
     (9.82e-06, 2.01e-02),
     (1.28e-06, 2.00e-02),
-    // NOTE: Table II has a row for tan(alpha)=1.32e-02 (1-r=4.51e-08, phi=1.32e-02) that
-    // Table III's gate-sequence table omits entirely -- no executable word exists for it in
-    // the paper's own source, so it's dropped here too, to keep this array in row-for-row
-    // correspondence with `OVER_ROTATION_TABLE` (which is built from Table III and
-    // therefore never had that row in the first place).
     (6.20e-08, 1.64e-02),
     (1.06e-07, 1.32e-02),
+    (4.51e-08, 1.32e-02),
     (8.13e-07, 1.15e-02),
     (3.33e-08, 1.16e-02),
     (1.68e-08, 1.01e-02),
