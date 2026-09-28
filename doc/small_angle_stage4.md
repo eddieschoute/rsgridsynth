@@ -29,11 +29,20 @@ which implements this. See that module's own doc comments for the concrete deriv
 
 ## The regions are one family
 
-| | Condition on top-left entry | Shape | Implemented as |
-|---|---|---|---|
-| Diagonal (Prop. 3.7) | `\|Re(w)\| >= sqrt(1-eps^2/4)` | circular cap, height ~eps^2/8 | `EpsilonRegion` |
-| Mixed diagonal (Prop. 3.13) | `\|Re(w)\| >= sqrt(1-eps/2)`, sign-split | circular cap, height ~eps/4 | `MixedDiagonalRegion` |
-| Appendix C / Bothe §V | unit disk ∩ hyperbola ∩ sign constraints | curved sliver | `SmallAngleRegion` |
+`eps`/`delta` throughout this document (and this table) is **diamond-norm** distance,
+matching `GridSynthConfig::epsilon` and this crate's one tolerance convention (see
+`CLAUDE.md`'s "Accuracy convention" section) -- `diagonal_diamond_distance = 2*sqrt(1 -
+Re(w)^2)` is the exact quantity each row's cap bounds. There is no separate
+"operator-norm-style"/"spec" convention anywhere in this crate; a historical
+`diamond_to_spec_epsilon` helper that halved a diamond budget before feeding it to
+`EpsilonRegion`/`MixedDiagonalRegion` has been removed, since both regions' caps were
+already diamond-exact.
+
+| | Condition on top-left entry | Shape | Diamond-norm budget bounded | Implemented as |
+|---|---|---|---|---|
+| Diagonal (Prop. 3.7) | `\|Re(w)\| >= sqrt(1-eps^2/4)` | circular cap, height ~eps^2/8 | `eps`, exact at boundary | `EpsilonRegion` |
+| Mixed diagonal (Prop. 3.13) | `\|Re(w)\| >= sqrt(1-eps/2)`, sign-split | circular cap, height ~eps/4 | `eps`, exact at boundary (mixture, see `mixture_weight`) | `MixedDiagonalRegion` |
+| Appendix C / Bothe §V | unit disk ∩ hyperbola ∩ sign constraints | curved sliver | `delta`, the whole mixture's budget directly | `SmallAngleRegion` |
 
 The first two differ only in the offset of a *straight* cutting line. Once the split stops
 being even, the admissible set for the searched branch is no longer a half-plane -- it's a

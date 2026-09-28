@@ -257,9 +257,9 @@ mod tests {
         let one = PREC.ib(IBig::ONE);
         let four = to_fbig(4.0);
         let eps_sq = &epsilon * &epsilon;
-        let half_eps_sq = &eps_sq / &four;
-        let one_minus_half_eps_sq = &one - &half_eps_sq;
-        let d = PREC.fb(one_minus_half_eps_sq.sqrt() * scale.to_real(PREC).sqrt());
+        let quarter_eps_sq = &eps_sq / &four;
+        let one_minus_quarter_eps_sq = &one - &quarter_eps_sq;
+        let d = PREC.fb(one_minus_quarter_eps_sq.sqrt() * scale.to_real(PREC).sqrt());
 
         for u in sample_domegas() {
             let re_w = frame.re_w(&u);

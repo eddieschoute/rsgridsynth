@@ -20,6 +20,14 @@ pub struct DiophantineData {
 #[derive(Debug)]
 pub struct GridSynthConfig {
     pub theta: FBig<HalfEven>,
+    /// The target accuracy, as a **diamond-norm** distance `||Z_theta - U||_diamond` between
+    /// the ideal target rotation channel and the synthesized one -- this crate's one
+    /// tolerance convention (no operator-norm variant exists anywhere in this crate; see
+    /// [`crate::accuracy::diagonal_diamond_distance`], the convention's normative
+    /// definition). `EpsilonRegion`'s search cap (`crate::gridsynth`) makes
+    /// `achieved_diamond_error(theta) <= epsilon` exact for the plain single-candidate path,
+    /// with equality reachable at the boundary -- so treat this as a tight bound, not one
+    /// with slack to spare.
     pub epsilon: FBig<HalfEven>,
     /// The working precision this config was built for. `gridsynth_gates`/`gridsynth_unitary`
     /// build every per-synthesis value from this -- there is no ambient or global precision
@@ -113,7 +121,9 @@ pub fn prec_bits_for_epsilon(epsilon_num: &IBig, epsilon_den: &IBig) -> usize {
 }
 
 /// Creates the default config to easily call the code from other rust packages.
-/// `seed` is used to set single RNG that is used through the call to `gridsynth`.
+/// `seed` is used to set single RNG that is used through the call to `gridsynth`. `epsilon`
+/// is a diamond-norm distance -- see [`GridSynthConfig::epsilon`]'s own doc comment for the
+/// convention this crate uses throughout.
 pub fn config_from_theta_epsilon(
     theta: f64,
     epsilon: f64,

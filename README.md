@@ -26,7 +26,10 @@ cargo build --bin rsgridsynth -F cli --release
 ```
 
 * `<theta>`: The rotation angle in radians (e.g. `0.6`)
-* `<epsilon>`: The target approximation error (e.g. `1e-8`); accuracy is fuzz-tested down to `1e-15`
+* `<epsilon>`: The target approximation error, as **diamond-norm distance**
+  `||Z_theta - U||_diamond` between the ideal rotation channel and the synthesized one (e.g.
+  `1e-8`); accuracy is fuzz-tested down to `1e-15`. This is *not* operator-norm distance --
+  an operator-norm bound on the same synthesized result is about `epsilon / 2`.
 
 ### Options
 
