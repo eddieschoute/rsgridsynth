@@ -46,6 +46,9 @@ use crate::protocol::mixed_diagonal::{
     StraddleOutcome,
 };
 use crate::protocol::mixing::{diamond_to_spec_epsilon, mixture_weight};
+use crate::protocol::small_angle::{
+    small_angle_could_help_half_angle, synth_small_angle_correction, DEFAULT_MAX_LIVE_SEARCH_K,
+};
 use crate::ring::{DRootTwo, ZRootTwo};
 use crate::synthesis_of_clifford_t::decompose_domega_unitary;
 use crate::unitary::DOmegaUnitary;
@@ -282,32 +285,64 @@ fn build_side(
     let two = prec.fb(FBig::try_from(2.0).unwrap());
     let epsilon_for_correction = (epsilon_spec / &two) / &v_norm_sq;
 
-    let exact_scale = ZRootTwo::new(IBig::from(1), IBig::from(0));
-    let correction_region = MixedDiagonalRegion::from_target_direction(
-        prec,
-        cos_neg_theta_b_half.clone(),
-        sin_neg_theta_b_half.clone(),
-        &epsilon_for_correction,
-        exact_scale.clone(),
-    );
-    let correction_unit_disk = UnitDisk::new(prec, exact_scale);
-    let correction_wframe =
-        WFrame::from_target_direction(prec, cos_neg_theta_b_half, sin_neg_theta_b_half);
-    let correction_transform = setup_regions_and_transform(
-        &correction_region,
-        &correction_unit_disk,
-        config.verbose,
-        config.measure_time,
-    );
-    let correction_outcome = search_for_straddling_pair(
-        &correction_region,
-        &correction_unit_disk,
-        &correction_transform,
-        config,
-        &correction_wframe,
-        &epsilon_for_correction,
-    );
-    let correction = assemble_result(prec, correction_outcome, &correction_wframe);
+    // Small-angle fast path (extends PR #3's mixed-diagonal optimization to this correction
+    // step): the residual angle `theta_B` is frequently small relative to
+    // `epsilon_for_correction` (e.g. whenever the projective step's `Arg(v)` already lands
+    // close to `theta`), in which case pinning the identity as one branch (see
+    // `crate::protocol::small_angle`) costs far fewer T gates on average than the even-split
+    // search below. `small_angle_could_help_half_angle` is an O(1) pre-check (no search), and
+    // a live-search miss (`None`) falls through to the always-correct even-split path exactly
+    // as `mixed_diagonal::synth_mixed_diagonal` already does for its own dispatch -- so this
+    // can only ever match or beat the previous (even-split-only) behavior, never regress it.
+    //
+    // Units: `epsilon_for_correction` is this crate's spec-style epsilon (it feeds directly
+    // into `MixedDiagonalRegion`, which expects that convention), whereas
+    // `SmallAngleRegion`/`synth_small_angle_correction` expect a diamond-norm budget directly
+    // (see `small_angle`'s own docs on why no `diamond_to_spec_epsilon` conversion applies
+    // there) -- so it must be converted back via the inverse of `diamond_to_spec_epsilon`
+    // (`eps_diamond = 2*eps_spec`) before use here.
+    let delta_for_correction = &two * &epsilon_for_correction;
+    let correction =
+        if small_angle_could_help_half_angle(prec, &delta_for_correction, &sin_neg_theta_b_half) {
+            synth_small_angle_correction(
+                config,
+                &cos_neg_theta_b_half,
+                &sin_neg_theta_b_half,
+                &delta_for_correction,
+                DEFAULT_MAX_LIVE_SEARCH_K,
+            )
+        } else {
+            None
+        };
+
+    let correction = correction.unwrap_or_else(|| {
+        let exact_scale = ZRootTwo::new(IBig::from(1), IBig::from(0));
+        let correction_region = MixedDiagonalRegion::from_target_direction(
+            prec,
+            cos_neg_theta_b_half.clone(),
+            sin_neg_theta_b_half.clone(),
+            &epsilon_for_correction,
+            exact_scale.clone(),
+        );
+        let correction_unit_disk = UnitDisk::new(prec, exact_scale);
+        let correction_wframe =
+            WFrame::from_target_direction(prec, cos_neg_theta_b_half, sin_neg_theta_b_half);
+        let correction_transform = setup_regions_and_transform(
+            &correction_region,
+            &correction_unit_disk,
+            config.verbose,
+            config.measure_time,
+        );
+        let correction_outcome = search_for_straddling_pair(
+            &correction_region,
+            &correction_unit_disk,
+            &correction_transform,
+            config,
+            &correction_wframe,
+            &epsilon_for_correction,
+        );
+        assemble_result(prec, correction_outcome, &correction_wframe)
+    });
 
     MixedFallbackSide {
         projective_gates,
@@ -487,6 +522,82 @@ mod tests {
             }
             other => panic!("expected Mixed for a generic angle, got {other:?}"),
         }
+    }
+
+    // Extends PR #3's small-angle optimization (identity pinned as one branch) to mixed
+    // fallback's per-side correction step. Passing the identity as the "projective"
+    // candidate makes the residual angle exactly the outer `theta`, so a small `theta`
+    // relative to the (spec-converted) correction budget puts `build_side` squarely in the
+    // small-angle-eligible regime -- mirrors
+    // `small_angle::tests::small_angle_beats_mixed_diagonal_for_small_theta`, but exercised
+    // through `build_side` itself (i.e. through the half-angle entry points, not the raw-f64
+    // ones) so a units mistake in the diamond<->spec conversion at that boundary would show up
+    // here as a correctness failure, not just a missed optimization.
+    #[test]
+    fn build_side_correction_beats_even_split_for_small_residual() {
+        use crate::config::config_from_theta_epsilon;
+        use crate::protocol::mixed_diagonal::even_split_search;
+
+        // `build_side`'s residual-correction budget is `delta_for_correction =
+        // 2*epsilon_for_correction = 2*(epsilon_spec/2) = epsilon_spec = delta/2` (when the
+        // "projective" step is the identity, `v_norm_sq = 1`, so `epsilon_for_correction =
+        // (epsilon_spec/2)/1`; see `build_side`'s own units comment). `delta = 2e-4` makes
+        // that budget `1e-4` -- the exact `(theta, delta)` pair already confirmed, in
+        // `small_angle::tests::synth_small_angle_finds_a_mixed_result_for_small_theta`, to
+        // find a live-search candidate within `DEFAULT_MAX_LIVE_SEARCH_K`.
+        let theta = 1e-3_f64;
+        let delta = 2e-4_f64;
+
+        let mut config = config_from_theta_epsilon(theta, delta, 7, false, false);
+        let prec = config.prec;
+        let epsilon_spec = diamond_to_spec_epsilon(prec, &config.epsilon);
+
+        let two = prec.fb(FBig::try_from(2.0).unwrap());
+        let neg_theta_half = -prec.fb(&config.theta / &two);
+        let theta_z_x = prec.fb(neg_theta_half.clone().cos());
+        let theta_z_y = prec.fb(neg_theta_half.sin());
+
+        let side = build_side(
+            prec,
+            DOmegaUnitary::identity(),
+            &theta_z_x,
+            &theta_z_y,
+            &epsilon_spec,
+            &mut config,
+        );
+
+        // The identity projective step means `v = 0`, so `epsilon_for_correction =
+        // (epsilon_spec/2)/1 = epsilon_spec/2` -- reproduce that here purely to build the
+        // even-split comparison at the same (spec-style) budget `build_side` itself used.
+        let epsilon_for_correction = &epsilon_spec / &two;
+        let even_split =
+            even_split_search(theta, fbig_to_f64(&epsilon_for_correction) * 2.0, 7, false);
+
+        let small_cost = fbig_to_f64(&side.correction.expected_t_count());
+        let even_cost = fbig_to_f64(&even_split.expected_t_count());
+        eprintln!(
+            "build_side small-angle correction mean T-count={small_cost}, \
+             even-split mean T-count={even_cost}"
+        );
+        assert!(
+            small_cost < even_cost,
+            "small-angle-assisted correction ({small_cost}) should beat even-split \
+             ({even_cost}) for a small residual angle"
+        );
+
+        let theta_fbig = FBig::<HalfEven>::try_from(theta)
+            .unwrap()
+            .with_precision(prec.bits())
+            .value();
+        let achieved = side.correction.achieved_diamond_error(&theta_fbig);
+        let budget = FBig::<HalfEven>::try_from(2.0 * fbig_to_f64(&epsilon_for_correction))
+            .unwrap()
+            .with_precision(prec.bits())
+            .value();
+        assert!(
+            achieved <= budget.clone() * FBig::<HalfEven>::try_from(1.5).unwrap(),
+            "achieved error {achieved} exceeds budget {budget}"
+        );
     }
 
     // Required acceptance: expected T-count slope. Computes, for each side, projective_t +
