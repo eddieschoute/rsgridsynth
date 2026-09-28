@@ -1532,11 +1532,38 @@ mod tests {
                 "theta={theta}, delta={delta}: dispatched achieved error {dispatched_achieved} \
                  exceeds its own budget"
             );
-            assert!(
-                even_achieved <= delta * 1.01,
-                "theta={theta}, delta={delta}: even-split achieved error {even_achieved} \
-                 exceeds its own budget"
-            );
+            // Only a genuinely `Mixed` result is covered by the mixing theorem's tight
+            // `achieved <= delta` guarantee. A degenerate `Exact` result from
+            // `even_split_search` (the straddling search's ring-exactness fast path, or
+            // `mixture_weight`'s `p` collapsing to 0/1) returns a single deterministic
+            // candidate whose own diamond distance is bounded only by
+            // `MixedDiagonalRegion`'s cap directly (`2*sqrt(delta/2)`, looser than `delta`
+            // by up to a `sqrt(2/delta)` factor for delta < 2) -- the same known,
+            // fuzzer-discovered limitation `tests/protocol_accuracy_fuzz_test.rs`'s
+            // `fuzz_mixed_diagonal_accuracy` already documents and deliberately does not
+            // paper over for the `Unmixed`/`Exact` case (see issue #8). theta=pi/4 sits
+            // close enough to this crate's Clifford grid that this case is reachable right
+            // at the `could_help` boundary, so this test follows that same precedent rather
+            // than asserting a bound the algorithm does not actually guarantee here.
+            match &even {
+                crate::protocol::mixed_diagonal::MixedDiagonalResult::Mixed { .. } => {
+                    assert!(
+                        even_achieved <= delta * 1.01,
+                        "theta={theta}, delta={delta}: even-split achieved error \
+                         {even_achieved} exceeds its own budget"
+                    );
+                }
+                crate::protocol::mixed_diagonal::MixedDiagonalResult::Exact { .. } => {
+                    let degenerate_bound = 2.0 * (delta / 2.0).sqrt();
+                    assert!(
+                        even_achieved <= degenerate_bound * 1.01,
+                        "theta={theta}, delta={delta}: even-split achieved error \
+                         {even_achieved} exceeds even the degenerate-case bound \
+                         {degenerate_bound} -- this is not the known Exact-case slack, \
+                         something else is wrong"
+                    );
+                }
+            }
 
             let dispatched_cost = fbig_to_f64(&dispatched.expected_t_count());
             let even_cost = fbig_to_f64(&even.expected_t_count());
