@@ -305,10 +305,11 @@ pub struct SmallAngleRegion {
 impl SmallAngleRegion {
     /// Builds the over-rotation search region for target angle `theta` (`0 <= theta <= pi`;
     /// see [`synth_small_angle`] for why callers must canonicalize into this range first) and
-    /// diamond-norm budget `delta` for the *whole* mixture (not this crate's usual halved
-    /// "operator-norm-style" `epsilon` convention -- `delta` here is compared directly
-    /// against [`crate::protocol::mixing::MixtureWeight::projective_diamond_error`], which is
-    /// already a diamond-norm quantity, so no conversion is needed or wanted).
+    /// diamond-norm budget `delta` for the *whole* mixture -- this crate's one tolerance
+    /// convention (see `CLAUDE.md`'s "Accuracy convention" section): `delta` here is
+    /// compared directly against
+    /// [`crate::protocol::mixing::MixtureWeight::projective_diamond_error`], which is already
+    /// a diamond-norm quantity, so no conversion is needed.
     pub fn new(
         prec: Prec,
         theta: &FBig<HalfEven>,
@@ -845,8 +846,8 @@ pub fn synth_small_angle_with_max_k(
 
     let mut config = config_from_theta_epsilon(theta_pos, epsilon_diamond, seed, verbose, false);
     let prec = config.prec;
-    // `delta` is the diamond-norm budget directly -- see `SmallAngleRegion::new`'s docs on
-    // why no `diamond_to_spec_epsilon` conversion is applied here.
+    // `delta` is the diamond-norm budget directly -- this crate's one tolerance convention,
+    // with no conversion applied anywhere (see `SmallAngleRegion::new`'s docs).
     let delta = config.epsilon.clone();
 
     let two = prec.fb(FBig::try_from(2.0).unwrap());
@@ -896,7 +897,11 @@ fn synth_small_angle_core(
     // when it actually meets `delta` AND its mean cost (`p * T-count`) doesn't exceed a cheap
     // estimate of what the angle-independent even-split protocol would cost
     // (`1.52*log2(1/delta) - 0.01`, this crate's own already-measured mixed-diagonal slope --
-    // see `mixed_diagonal::tests::slope_fit_cost_vs_log2_inv_epsilon`). Without that second
+    // see `mixed_diagonal::tests::slope_fit_cost_vs_log2_inv_epsilon`). This formula's slope
+    // (not its intercept) is unaffected by `even_split_search` no longer pre-halving its
+    // diamond-norm budget: that change is a constant ~1.52*log2(2)=1.52-per-halving offset,
+    // not a slope change, and the measured slope stayed close to 1.52 after it (see that
+    // same test). Without that second
     // check, a table candidate that merely *meets budget* (but isn't actually a good choice
     // for this specific theta -- the table's ~55 rows are theta-independent, so for some
     // (theta, delta) none of them is close to optimal) could regress mean cost below what
