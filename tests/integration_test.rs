@@ -11,6 +11,13 @@ fn fbig_to_f64(x: &FBig<HalfEven>) -> f64 {
     }
 }
 
+/// Relative slack for an `achieved <= epsilon` diamond-norm assertion -- see
+/// `tests/accuracy_fuzz_test.rs`'s copy of this helper for the full derivation.
+fn measurement_slack(epsilon: f64) -> f64 {
+    let prec_bits = (12.0 * (1.0 / epsilon).log10()).max(16.0);
+    (16.0 * 2f64.powf(-prec_bits) / (epsilon * epsilon)).max(1e-9)
+}
+
 #[test]
 fn simple_test() {
     let pi = std::f64::consts::PI;
@@ -121,7 +128,8 @@ fn test_correct_decomposition_exact() {
 
         let res = gridsynth_gates(&mut gridsynth_config);
         let error = res.achieved_diamond_error(&gridsynth_config.theta);
-        let is_correct = fbig_to_f64(&error) < fbig_to_f64(&gridsynth_config.epsilon) * 2.0;
+        let eps_f64 = fbig_to_f64(&gridsynth_config.epsilon);
+        let is_correct = fbig_to_f64(&error) < eps_f64 * (1.0 + measurement_slack(eps_f64));
 
         // not printed, unless cargo test is run with -- -no-capture
         println!(
@@ -130,8 +138,9 @@ fn test_correct_decomposition_exact() {
             fbig_to_f64(&error),
         );
 
-        // Check that the diamond-norm error is within the requested (doubled, per the
-        // diamond-vs-operator-norm convention) budget.
+        // Check that the diamond-norm error is within the requested budget -- `epsilon` is
+        // itself a diamond-norm distance, exact at `EpsilonRegion`'s cap boundary, so no
+        // doubling belongs here (see `CLAUDE.md`'s "Accuracy convention" section).
         assert!(is_correct);
     }
 }
@@ -152,7 +161,8 @@ fn test_correct_decomposition_up_to_phase() {
 
         let res = gridsynth_gates(&mut gridsynth_config);
         let error = res.achieved_diamond_error(&gridsynth_config.theta);
-        let is_correct = fbig_to_f64(&error) < fbig_to_f64(&gridsynth_config.epsilon) * 2.0;
+        let eps_f64 = fbig_to_f64(&gridsynth_config.epsilon);
+        let is_correct = fbig_to_f64(&error) < eps_f64 * (1.0 + measurement_slack(eps_f64));
 
         // not printed, unless cargo test is run with -- -no-capture
         println!(
@@ -160,8 +170,8 @@ fn test_correct_decomposition_up_to_phase() {
             res.gates,
             fbig_to_f64(&error),
         );
-        // Check that the diamond-norm error is within the requested (doubled, per the
-        // diamond-vs-operator-norm convention) budget.
+        // Check that the diamond-norm error is within the requested budget -- see the
+        // analogous comment in `test_correct_decomposition_exact`.
         assert!(is_correct);
     }
 }
@@ -193,7 +203,8 @@ fn test_shared_cache_across_denomexp_no_panic() {
                 config_from_theta_epsilon(theta, epsilon, seed, verbose, up_to_phase);
             let res = gridsynth_gates(&mut gridsynth_config);
             let error = fbig_to_f64(&res.achieved_diamond_error(&gridsynth_config.theta));
-            let is_correct = error < fbig_to_f64(&gridsynth_config.epsilon) * 2.0;
+            let eps_f64 = fbig_to_f64(&gridsynth_config.epsilon);
+            let is_correct = error < eps_f64 * (1.0 + measurement_slack(eps_f64));
             (error, is_correct)
         }));
 

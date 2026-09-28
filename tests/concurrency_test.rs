@@ -35,6 +35,15 @@ fn fbig_to_f64(x: &dashu_float::FBig<dashu_float::round::mode::HalfEven>) -> f64
     }
 }
 
+/// Relative slack for an `achieved <= epsilon` diamond-norm assertion -- see
+/// `tests/accuracy_fuzz_test.rs`'s copy of this helper for the full derivation. `epsilon = 1e-2`
+/// appears in this file's epsilon list, so the coarse-precision case (~2.4e-3 relative noise) is
+/// actually exercised here, not just theoretical.
+fn measurement_slack(epsilon: f64) -> f64 {
+    let prec_bits = (12.0 * (1.0 / epsilon).log10()).max(16.0);
+    (16.0 * 2f64.powf(-prec_bits) / (epsilon * epsilon)).max(1e-9)
+}
+
 /// The decisive test: many threads synthesize concurrently at very different epsilons (so a
 /// precision mix-up would be numerically obvious, not a rounding-noise-sized discrepancy),
 /// and each must independently meet its own requested accuracy. Before this crate's precision
@@ -73,12 +82,12 @@ fn concurrent_synthesis_meets_each_own_epsilon() {
                     );
 
                     let err = fbig_to_f64(&res.achieved_diamond_error(&config.theta));
+                    let budget = epsilon * (1.0 + measurement_slack(epsilon));
                     assert!(
-                        err <= 2.0 * epsilon,
+                        err <= budget,
                         "thread {i} round {round}: theta={theta} epsilon={epsilon:e} \
                          bits={expected_bits} achieved diamond error {err:e} exceeds budget \
-                         {:e}",
-                        2.0 * epsilon
+                         {budget:e}"
                     );
                 }
             })

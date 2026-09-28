@@ -770,15 +770,42 @@ mod debug_tests {
         );
     }
 
-    /// Calibration check: what does the EXISTING, unmodified plain-diagonal protocol's
-    /// `epsilon` parameter actually correspond to in diamond-norm terms?
+    /// Relative slack for an `achieved <= epsilon` diamond-norm assertion. The *bound* is
+    /// exact -- `EpsilonRegion`'s cap `Re(w) >= sqrt(1 - eps^2/4)` gives
+    /// `diagonal_diamond_distance = 2*sqrt(1 - Re(w)^2) <= eps`, with equality on the
+    /// boundary. The *evaluation* is not: working precision is only
+    /// `12 * log10(1/epsilon)` bits (`config::prec_bits_for_epsilon`), and since
+    /// `1 - Re(w)^2 ~= eps^2/4`, an absolute error `2^-prec` in `Re(w)` (or a round-down in
+    /// the region's own `d = sqrt(...)`) becomes a *relative* error `~4 * 2^-prec / eps^2`
+    /// in the reported distance: ~2.4e-3 at eps=1e-2 (only 24 working bits), ~6e-5 at 1e-3,
+    /// ~1.4e-6 at 1e-4, below 1e-9 from 1e-6 down. A flat 1e-9 margin is therefore NOT
+    /// safe at coarse epsilon. Measured saturation for reference: the plain path reaches
+    /// dd/eps = 0.99977 at eps=1e-3 over 320 angles, and 0.9723 at eps=1e-10.
+    fn measurement_slack(epsilon: f64) -> f64 {
+        let prec_bits = (12.0 * (1.0 / epsilon).log10()).max(16.0);
+        (16.0 * 2f64.powf(-prec_bits) / (epsilon * epsilon)).max(1e-9)
+    }
+
+    /// Calibration check, now asserting: `EpsilonRegion`'s epsilon parameter IS a
+    /// diamond-norm budget (not the "operator-norm-style" one the crate used to claim), so
+    /// the achieved diamond distance of the plain-diagonal protocol's unmodified output must
+    /// never exceed it (up to the measurement slack above). See `CLAUDE.md`'s "Accuracy
+    /// convention" section.
+    ///
+    /// `up_to_phase=true` (`PhaseMode::Shifted`) is deliberately not exercised here: this
+    /// module's whole point is to stay independent of the crate's own
+    /// `accuracy::gate_seq_diamond_error`, but that function is also the only place the
+    /// `e^{i pi/8}` phase correction needed to compare a `Shifted` candidate against the
+    /// plain target is implemented -- reimplementing it independently here would risk a
+    /// subtly wrong check. `up_to_phase=true` is already covered, via the crate's own
+    /// (correct) phase handling, by `tests/accuracy_fuzz_test.rs::fuzz_accuracy_up_to_phase`.
     #[test]
     fn plain_diagonal_epsilon_convention_calibration() {
         use rsgridsynth::config::config_from_theta_epsilon;
         use rsgridsynth::gridsynth::gridsynth_gates;
 
         for &theta_f64 in &[0.1_f64, 0.7, 1.3, 2.5] {
-            for &eps in &[1e-3_f64, 1e-4, 1e-5, 1e-6] {
+            for &eps in &[1e-2_f64, 1e-3, 1e-4, 1e-5, 1e-6] {
                 let mut config = config_from_theta_epsilon(theta_f64, eps, 42, false, false);
                 let result = gridsynth_gates(&mut config);
                 let theta = to_fbig(theta_f64);
@@ -789,6 +816,12 @@ mod debug_tests {
                     "theta={theta_f64}, epsilon_param={eps}, achieved_diamond_distance={dd_f64}, \
                      ratio={:.4}",
                     dd_f64 / eps
+                );
+                assert!(
+                    dd_f64 <= eps * (1.0 + measurement_slack(eps)),
+                    "plain-diagonal epsilon convention broken: EpsilonRegion's cap \
+                     guarantees diamond <= epsilon exactly, got dd={dd_f64:e} for \
+                     eps={eps:e}, theta={theta_f64}"
                 );
             }
         }
