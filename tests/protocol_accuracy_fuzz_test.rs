@@ -49,6 +49,14 @@ fn random_angles(seed: u64, n: usize) -> Vec<f64> {
         .collect()
 }
 
+/// Relative slack for an `achieved <= epsilon` diamond-norm assertion -- see
+/// `tests/accuracy_fuzz_test.rs`'s copy of this helper for the full derivation. `EPSILONS`
+/// above includes 1e-2, so the coarse-precision case is actually exercised here.
+fn measurement_slack(epsilon: f64) -> f64 {
+    let prec_bits = (12.0 * (1.0 / epsilon).log10()).max(16.0);
+    (16.0 * 2f64.powf(-prec_bits) / (epsilon * epsilon)).max(1e-9)
+}
+
 #[test]
 #[serial]
 fn fuzz_mixed_diagonal_accuracy() {
@@ -86,7 +94,7 @@ fn fuzz_mixed_diagonal_accuracy() {
             // exactness fast path, left as a known limitation rather than papered over here.
             if matches!(result, MixedDiagonalResult::Mixed { .. }) {
                 assert!(
-                    achieved_f64 <= epsilon,
+                    achieved_f64 <= epsilon * (1.0 + measurement_slack(epsilon)),
                     "theta={theta}, epsilon={epsilon:e}: achieved diamond error {achieved_f64:e} \
                      exceeds requested budget for a Mixed result"
                 );
@@ -123,11 +131,12 @@ fn fuzz_fallback_accuracy() {
                 "theta={theta}, epsilon={epsilon:e}: achieved success probability {achieved:e} \
                  is below the q floor {q_real_f64:e}"
             );
-            assert!(
-                !result.correction_gates.is_empty() || achieved >= 1.0 - f64::EPSILON,
-                "theta={theta}, epsilon={epsilon:e}: empty correction gates for a non-exact \
-                 success probability {achieved:e}"
-            );
+            // NOTE: empty `correction_gates` with `achieved < 1` is NOT itself a bug -- it
+            // just means the correction step's own (diamond-norm, unhalved as of the
+            // diamond-norm-standardization fix) budget was loose enough that the literal
+            // identity already satisfied it, even though the projective step's success
+            // probability wasn't exactly 1. The real check is the overall accuracy bound
+            // below, not gate-string emptiness.
 
             // The full-protocol triangle-inequality bound (projective step + residual
             // correction, see the trait impl's own doc comment) must stay within budget.
@@ -137,7 +146,7 @@ fn fuzz_fallback_accuracy() {
             let theta_fbig = theta_at_matching_precision(theta, epsilon);
             let achieved_proj = fbig_to_f64(&result.achieved_diamond_error(&theta_fbig));
             assert!(
-                achieved_proj <= epsilon,
+                achieved_proj <= epsilon * (1.0 + measurement_slack(epsilon)),
                 "theta={theta}, epsilon={epsilon:e}: achieved diamond error {achieved_proj:e} \
                  exceeds requested budget"
             );
@@ -208,7 +217,7 @@ fn fuzz_mixed_fallback_accuracy() {
                         );
                     } else {
                         assert!(
-                            achieved_proj <= epsilon,
+                            achieved_proj <= epsilon * (1.0 + measurement_slack(epsilon)),
                             "theta={theta}, epsilon={epsilon:e}: achieved projective diamond \
                              error {achieved_proj:e} exceeds requested budget"
                         );

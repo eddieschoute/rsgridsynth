@@ -29,7 +29,6 @@ use crate::gate::{Gate, GateSeq};
 use crate::gridsynth::{
     search_for_solution, setup_regions_and_transform, EpsilonRegion, PhaseMode, UnitDisk,
 };
-use crate::protocol::mixing::diamond_to_spec_epsilon;
 use crate::region::Ellipse;
 use crate::ring::{DOmega, DRootTwo, ZRootTwo};
 use crate::synthesis_of_clifford_t::decompose_domega_unitary;
@@ -524,11 +523,17 @@ impl AchievedDiamondError for FallbackResult {
 /// (arXiv:1409.3552) as adapted by Kliuchnikov et al. (arXiv:2203.10064v2, Prop 3.9).
 ///
 /// `sin_alpha` (the sine of the sector's angular half-width) is exposed as an explicit
-/// parameter rather than hardcoded from `epsilon_diamond` -- for plain fallback, callers
-/// typically want `sin_alpha` set to half of this crate's operator-norm-style epsilon (i.e.
-/// `diamond_to_spec_epsilon(epsilon_diamond) / 2`, mirroring `EpsilonRegion`'s own `epsilon
-/// / 2` factor), but leaving it as a parameter lets a later "mixed fallback" stage reuse
-/// this same [`SectorRegion`]/`synth_fallback` machinery with a different `sin_alpha`.
+/// parameter rather than hardcoded from `epsilon_diamond`, but callers typically want it
+/// set so this function's own even split of the diamond-norm budget between the success and
+/// failure terms comes out to `epsilon_diamond` exactly: `achieved_diamond_error`'s bound is
+/// `p_success * success_dist + (1 - p_success) * failure_dist`, with `success_dist <=
+/// 2*sin_alpha` (the sector's own angular half-width) and, with `epsilon_for_correction`
+/// below chosen as `(epsilon_diamond/2)/|v|^2`, `failure_dist <= epsilon_diamond/2`
+/// (`|v|^2 = 1 - p_success` cancels the `1 - p_success` weight exactly). An even split of the
+/// two terms therefore needs `sin_alpha = epsilon_diamond/4`, giving `success_dist`'s
+/// contribution `<= epsilon_diamond/2` too, and the total `<= epsilon_diamond` exactly. This
+/// is a parameter (not hardcoded) so a later "mixed fallback" stage can reuse this same
+/// [`SectorRegion`]/`synth_fallback` machinery with a different `sin_alpha`.
 ///
 /// Returns `None` if the projective or correction search exceeds its own internal bound
 /// without finding a solution (propagated from `search_for_solution`), rather than
@@ -544,9 +549,6 @@ pub fn synth_fallback(
 ) -> Option<FallbackResult> {
     let mut config = config_from_theta_epsilon(theta, epsilon_diamond, seed, verbose, false);
     let prec = config.prec;
-
-    let eps_diamond_fbig = config.epsilon.clone();
-    let epsilon_spec = diamond_to_spec_epsilon(prec, &eps_diamond_fbig);
 
     let sin_alpha_fbig = to_fbig(prec, sin_alpha);
     let exact_scale = ZRootTwo::new(IBig::from(1), IBig::from(0));
@@ -593,7 +595,10 @@ pub fn synth_fallback(
     let cos_neg_theta_b_half = (&z_x * &cos_half_phi) - (&z_y * &sin_half_phi);
     let sin_neg_theta_b_half = (&z_y * &cos_half_phi) + (&z_x * &sin_half_phi);
 
-    let epsilon_for_correction = (&epsilon_spec / &two) / &v_norm_sq;
+    // The other half of the even split (see `synth_fallback`'s doc for the accounting);
+    // `EpsilonRegion`'s epsilon is itself a diamond-norm budget (see its own doc comment), so
+    // no norm conversion applies here, only the split and the `1/|v|^2` failure-weight rescale.
+    let epsilon_for_correction = (&config.epsilon / &two) / &v_norm_sq;
 
     let correction_region = EpsilonRegion::from_target_direction(
         prec,
