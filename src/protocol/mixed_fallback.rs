@@ -350,13 +350,20 @@ fn build_side(
             config.verbose,
             config.measure_time,
         );
+        // Half the correction region's own budget -- see `search_for_straddling_pair`'s
+        // `phase_tolerance` doc (a ring-exact candidate's diamond distance is exactly
+        // 2*|Im(w)|), same treatment as `even_split_search`'s and this function's own
+        // top-level `phase_tolerance`. Pre-existing bug on `develop` (this call passed
+        // `epsilon_for_correction` unhalved), worsened by this PR doubling
+        // `epsilon_for_correction`'s value -- fixed here rather than left in place.
+        let correction_phase_tolerance = &epsilon_for_correction / &two;
         let correction_outcome = search_for_straddling_pair(
             &correction_region,
             &correction_unit_disk,
             &correction_transform,
             config,
             &correction_wframe,
-            &epsilon_for_correction,
+            &correction_phase_tolerance,
         );
         assemble_result(prec, correction_outcome, &correction_wframe)
     });
@@ -388,13 +395,20 @@ pub fn synth_mixed_fallback(
 ) -> Option<MixedFallbackResult> {
     let mut config = config_from_theta_epsilon(theta, epsilon_diamond, seed, verbose, false);
     let prec = config.prec;
+    // Cloned once, up front: `build_side` below also takes `&mut config`, and a borrow of
+    // `config.epsilon` can't coexist with a mutable borrow of all of `config` in the same
+    // call -- easier to keep one owned diamond-norm-budget value around (under its own name,
+    // distinct from the `epsilon_diamond: f64` parameter above) than to re-derive it, or
+    // re-clone it, at each of the several places below that need it.
+    let epsilon_diamond_fbig = config.epsilon.clone();
 
     // Mixed protocols' wider angular half-width: an even split gives the projective-mixture
     // term (`2*sin_alpha^2`, see the `AchievedDiamondError` impl's accounting doc) a share
     // `epsilon_diamond/2` of the total budget, so `sin_alpha = sqrt(epsilon_diamond/4)` --
     // vs. plain fallback's `sin_alpha = epsilon_diamond/4` directly (Prop 3.16 vs. Prop 3.9).
+    let two = prec.fb(FBig::try_from(2.0).unwrap());
     let four = prec.fb(FBig::try_from(4.0).unwrap());
-    let sin_alpha = (&config.epsilon / &four).sqrt();
+    let sin_alpha = (&epsilon_diamond_fbig / &four).sqrt();
 
     let scale = ZRootTwo::new(IBig::from(1), IBig::from(0));
     let sector_region = SectorRegion::new(prec, &config.theta, q, sin_alpha, scale.clone());
@@ -410,8 +424,7 @@ pub fn synth_mixed_fallback(
     // Half the overall diamond-norm budget -- see `search_for_straddling_pair`'s
     // `phase_tolerance` doc (an exact-ring candidate's diamond distance is exactly
     // 2*|Im(w)|), same value this crate has always used here.
-    let two = prec.fb(FBig::try_from(2.0).unwrap());
-    let phase_tolerance = &config.epsilon / &two;
+    let phase_tolerance = &epsilon_diamond_fbig / &two;
     let outcome = search_for_straddling_pair(
         &sector_region,
         &unit_disk,
@@ -442,16 +455,12 @@ pub fn synth_mixed_fallback(
             let theta_z_x = prec.fb(neg_theta_half.cos());
             let theta_z_y = prec.fb(neg_theta_half.sin());
 
-            // `config.epsilon` is cloned into a local first: `build_side` also takes `&mut
-            // config`, and the two can't coexist as a borrow of `config.epsilon` plus a
-            // mutable borrow of all of `config` in the same call.
-            let epsilon_diamond = config.epsilon.clone();
             let lo_side = build_side(
                 prec,
                 lo,
                 &theta_z_x,
                 &theta_z_y,
-                &epsilon_diamond,
+                &epsilon_diamond_fbig,
                 &mut config,
             );
             let hi_side = build_side(
@@ -459,7 +468,7 @@ pub fn synth_mixed_fallback(
                 hi,
                 &theta_z_x,
                 &theta_z_y,
-                &epsilon_diamond,
+                &epsilon_diamond_fbig,
                 &mut config,
             );
 

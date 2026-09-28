@@ -80,6 +80,19 @@ use rsgridsynth::protocol::{
 };
 use rsgridsynth::unitary::DOmegaUnitary;
 
+// Shares `measurement_slack` with `tests/common/mod.rs` via an explicit `#[path]` rather
+// than keeping a second hand-duplicated copy: this example and the `tests/` targets are
+// separate compilation units, but Cargo (via `rustc`'s `#[path]`) will still happily
+// compile the same source file into both. `#[path]` resolves relative to this file's own
+// directory only when the `mod` item sits at the file's top level (not nested inside
+// another `mod`), hence declaring it here rather than inside `debug_tests` below, and
+// `#[cfg(test)]` since only that (test-only) module uses it.
+#[cfg(test)]
+#[path = "../tests/common/mod.rs"]
+mod common;
+#[cfg(test)]
+use common::measurement_slack;
+
 /// Fixed, generous working precision for this file's independent verification arithmetic.
 /// Precision is explicit everywhere in this crate now (no ambient/global state), so this
 /// file picks its own -- deliberately larger than any epsilon tested below needs, since the
@@ -770,21 +783,7 @@ mod debug_tests {
         );
     }
 
-    /// Relative slack for an `achieved <= epsilon` diamond-norm assertion. The *bound* is
-    /// exact -- `EpsilonRegion`'s cap `Re(w) >= sqrt(1 - eps^2/4)` gives
-    /// `diagonal_diamond_distance = 2*sqrt(1 - Re(w)^2) <= eps`, with equality on the
-    /// boundary. The *evaluation* is not: working precision is only
-    /// `12 * log10(1/epsilon)` bits (`config::prec_bits_for_epsilon`), and since
-    /// `1 - Re(w)^2 ~= eps^2/4`, an absolute error `2^-prec` in `Re(w)` (or a round-down in
-    /// the region's own `d = sqrt(...)`) becomes a *relative* error `~4 * 2^-prec / eps^2`
-    /// in the reported distance: ~2.4e-3 at eps=1e-2 (only 24 working bits), ~6e-5 at 1e-3,
-    /// ~1.4e-6 at 1e-4, below 1e-9 from 1e-6 down. A flat 1e-9 margin is therefore NOT
-    /// safe at coarse epsilon. Measured saturation for reference: the plain path reaches
-    /// dd/eps = 0.99977 at eps=1e-3 over 320 angles, and 0.9723 at eps=1e-10.
-    fn measurement_slack(epsilon: f64) -> f64 {
-        let prec_bits = (12.0 * (1.0 / epsilon).log10()).max(16.0);
-        (16.0 * 2f64.powf(-prec_bits) / (epsilon * epsilon)).max(1e-9)
-    }
+    use super::measurement_slack;
 
     /// Calibration check, now asserting: `EpsilonRegion`'s epsilon parameter IS a
     /// diamond-norm budget (not the "operator-norm-style" one the crate used to claim), so
