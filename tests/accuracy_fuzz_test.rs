@@ -2,18 +2,23 @@
 //!
 //! These generate many random target angles across a range of epsilons -- down to 1e-15 -- and
 //! check that the synthesized gate string is actually within the requested tolerance of the
-//! ideal rotation. Accuracy is computed on demand via
-//! `GridSynthResult::achieved_diamond_error` (`AchievedDiamondError`), not cached eagerly during
-//! synthesis, and cross-checked against a genuinely different derivation
-//! (`independent_operator_error` below): it rebuilds the exact unitary represented by the
-//! returned gate string (via `DOmegaUnitary::from_gates`) and the ideal target rotation (via
-//! `Prec::cos`/`Prec::sin` at the same working precision) and computes the *operator*-norm
-//! distance between them from the full matrix eigenvalue formula -- a different code path from
-//! `achieved_diamond_error`'s `WFrame`-based shortcut, related by the well-known
-//! `diamond = 2 * operator_norm` identity for this special (SU(2)-with-phase) matrix form. That
-//! way a bug in either derivation would show up as a disagreement, not just as both being wrong
-//! in the same way.
+//! ideal rotation. `GridSynthConfig::epsilon` is a diamond-norm budget (see `CLAUDE.md`'s
+//! "Accuracy convention" section) -- `EpsilonRegion`'s cap makes `achieved_diamond_error <=
+//! epsilon` exact, with equality on the boundary, so there is no factor-of-2 slack to spend.
+//! Accuracy is computed on demand via `GridSynthResult::achieved_diamond_error`
+//! (`AchievedDiamondError`), not cached eagerly during synthesis, and cross-checked against a
+//! genuinely different derivation (`independent_operator_error` below): it rebuilds the exact
+//! unitary represented by the returned gate string (via `DOmegaUnitary::from_gates`) and the
+//! ideal target rotation (via `Prec::cos`/`Prec::sin` at the same working precision) and computes
+//! the *operator*-norm distance between them from the full matrix eigenvalue formula -- a
+//! different code path from `achieved_diamond_error`'s `WFrame`-based shortcut, related by the
+//! well-known `diamond = 2 * operator_norm` identity for this special (SU(2)-with-phase) matrix
+//! form. That way a bug in either derivation would show up as a disagreement, not just as both
+//! being wrong in the same way.
 
+mod common;
+
+use common::measurement_slack;
 use dashu_base::Approximation;
 use dashu_float::round::mode::HalfEven;
 use dashu_float::FBig;
@@ -40,6 +45,23 @@ fn fbig_to_f64(x: &FBig<HalfEven>) -> f64 {
         Approximation::Exact(v) => v,
         Approximation::Inexact(v, _) => v,
     }
+}
+
+/// The exact operator-norm counterpart of `EpsilonRegion`'s diamond-norm cap: a candidate at
+/// the boundary has `Re(w) = sqrt(1 - eps^2/4)`, so its operator-norm distance to the target is
+/// `sqrt(2 - 2*Re(w))`. NOT `epsilon / 2` -- that is only the leading order; the exact value
+/// exceeds it by a relative `eps^2/32` (~3e-6 at eps=1e-2), which a naive `epsilon / 2.0` bound
+/// would fail to cover.
+///
+/// Computed as `sqrt(2*x / (1 + sqrt(1-x)))` for `x = eps^2/4`, the algebraic rationalization
+/// of `sqrt(2 - 2*sqrt(1-x))` (multiply/divide by `1 + sqrt(1-x)`), rather than the textbook
+/// form directly: at small epsilon, `x` is tiny and `1.0 - x` rounds to exactly `1.0` in `f64`,
+/// so `2.0 - 2.0*(1.0-x).sqrt()` catastrophically cancels to exactly `0.0` (observed at
+/// epsilon=1e-8 during development). The rationalized form never subtracts two nearly-equal
+/// floats, so it stays accurate down to the smallest epsilon this crate supports.
+fn operator_budget(epsilon: f64) -> f64 {
+    let x = epsilon * epsilon / 4.0;
+    (2.0 * x / (1.0 + (1.0 - x).sqrt())).sqrt()
 }
 
 /// Recomputes the *operator*-norm distance between the ideal z-rotation by `theta` and the
@@ -81,9 +103,10 @@ fn independent_operator_error(
 
 /// Runs the fuzzer for a given `up_to_phase` setting across a spread of epsilons -- from coarse
 /// (1e-2) down to 1e-15 -- and many random target angles per epsilon, checking that:
-///  - the on-demand `achieved_diamond_error` is within the requested (diamond-norm, i.e.
-///    `2*epsilon`) budget,
-///  - an independently derived operator-norm error is *also* within budget (`epsilon`),
+///  - the on-demand `achieved_diamond_error` is within the requested diamond-norm budget
+///    (`epsilon`, exactly -- see the module doc),
+///  - an independently derived operator-norm error is *also* within the exact operator-norm
+///    counterpart of that same budget (`operator_budget(epsilon)`, ~`epsilon/2`),
 ///  - the two error computations -- different derivations, related by `diamond = 2*operator` --
 ///    agree with each other.
 fn run_accuracy_fuzz(up_to_phase: bool, thetas_per_epsilon: usize, seeds: &[u64]) {
@@ -101,13 +124,13 @@ fn run_accuracy_fuzz(up_to_phase: bool, thetas_per_epsilon: usize, seeds: &[u64]
                     config_from_theta_epsilon(theta, epsilon, seed, false, up_to_phase);
                 let res = gridsynth_gates(&mut config);
 
+                let slack = measurement_slack(epsilon);
                 let diamond_error = fbig_to_f64(&res.achieved_diamond_error(&config.theta));
                 assert!(
-                    diamond_error <= 2.0 * epsilon,
+                    diamond_error <= epsilon * (1.0 + slack),
                     "achieved diamond error {diamond_error:e} exceeds requested budget \
-                     2*epsilon={:e} for theta={theta}, epsilon={epsilon:e}, seed={seed}, \
+                     epsilon={epsilon:e} for theta={theta}, seed={seed}, \
                      up_to_phase={up_to_phase}, gates={}",
-                    2.0 * epsilon,
                     res.gates
                 );
 
@@ -117,11 +140,12 @@ fn run_accuracy_fuzz(up_to_phase: bool, thetas_per_epsilon: usize, seeds: &[u64]
                     &config.theta,
                     res.global_phase,
                 );
+                let op_budget = operator_budget(epsilon);
                 assert!(
-                    independent_error <= epsilon,
-                    "independently computed operator error {independent_error:e} exceeds \
-                     requested epsilon {epsilon:e} for theta={theta}, seed={seed}, \
-                     up_to_phase={up_to_phase}, gates={}",
+                    independent_error <= op_budget * (1.0 + slack),
+                    "independently computed operator error {independent_error:e} exceeds the \
+                     exact operator-norm budget {op_budget:e} for theta={theta}, \
+                     epsilon={epsilon:e}, seed={seed}, up_to_phase={up_to_phase}, gates={}",
                     res.gates
                 );
 
@@ -170,20 +194,21 @@ fn fuzz_accuracy_at_1e_minus_15() {
         let mut config = config_from_theta_epsilon(theta, epsilon, 42, false, false);
         let res = gridsynth_gates(&mut config);
 
+        let slack = measurement_slack(epsilon);
         let diamond_error = fbig_to_f64(&res.achieved_diamond_error(&config.theta));
         assert!(
-            diamond_error <= 2.0 * epsilon,
-            "achieved diamond error {diamond_error:e} exceeds requested budget 2*epsilon={:e} \
-             for theta={theta}",
-            2.0 * epsilon
+            diamond_error <= epsilon * (1.0 + slack),
+            "achieved diamond error {diamond_error:e} exceeds requested budget epsilon={epsilon:e} \
+             for theta={theta}"
         );
 
         let independent_error =
             independent_operator_error(config.prec, &res.gates, &config.theta, res.global_phase);
+        let op_budget = operator_budget(epsilon);
         assert!(
-            independent_error <= epsilon,
-            "independently computed operator error {independent_error:e} exceeds requested \
-             epsilon {epsilon:e} for theta={theta}, gates={}",
+            independent_error <= op_budget * (1.0 + slack),
+            "independently computed operator error {independent_error:e} exceeds the exact \
+             operator-norm budget {op_budget:e} for theta={theta}, gates={}",
             res.gates
         );
     }

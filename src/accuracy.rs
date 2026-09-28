@@ -108,6 +108,13 @@ impl WFrame {
 /// Exact diamond-norm distance between a target Z-rotation and its diagonal-unitary
 /// approximation, given only the achieved `Re(w)` (`w = u * e^{i theta/2}`, see
 /// [`WFrame::re_w`]): `||Z_phi - U||_diamond = 2*sqrt(1 - Re(w)^2)`.
+///
+/// This formula is the normative definition of the diamond-norm tolerance convention this
+/// crate uses everywhere -- `GridSynthConfig::epsilon` and every `protocol::synth_*` entry
+/// point mean this quantity, with no operator-norm variant and no conversion between
+/// conventions anywhere in the crate (see `CLAUDE.md`'s "Accuracy convention" section).
+/// `EpsilonRegion`/`MixedDiagonalRegion`/`SmallAngleRegion` (and their kin) are all
+/// parameterized in these same units.
 pub fn diagonal_diamond_distance(prec: Prec, re_w: &FBig<HalfEven>) -> FBig<HalfEven> {
     let one = prec.ib(IBig::ONE);
     let re_w_sq = re_w * re_w;

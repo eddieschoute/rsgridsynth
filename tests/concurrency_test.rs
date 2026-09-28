@@ -21,6 +21,9 @@
 //! let a concurrently-running test's cache population change another test's RNG consumption
 //! and hence its golden string).
 
+mod common;
+
+use common::measurement_slack;
 use rsgridsynth::accuracy::AchievedDiamondError;
 use rsgridsynth::config::config_from_theta_epsilon;
 use rsgridsynth::gridsynth::gridsynth_gates;
@@ -34,6 +37,10 @@ fn fbig_to_f64(x: &dashu_float::FBig<dashu_float::round::mode::HalfEven>) -> f64
         dashu_base::Approximation::Inexact(v, _) => v,
     }
 }
+
+// `measurement_slack` (from `common`) is exercised at a genuinely coarse epsilon here:
+// `epsilon = 1e-2` is in this file's epsilon list, so the ~2.4e-3 relative-noise case is
+// actually hit, not just theoretical.
 
 /// The decisive test: many threads synthesize concurrently at very different epsilons (so a
 /// precision mix-up would be numerically obvious, not a rounding-noise-sized discrepancy),
@@ -73,12 +80,12 @@ fn concurrent_synthesis_meets_each_own_epsilon() {
                     );
 
                     let err = fbig_to_f64(&res.achieved_diamond_error(&config.theta));
+                    let budget = epsilon * (1.0 + measurement_slack(epsilon));
                     assert!(
-                        err <= 2.0 * epsilon,
+                        err <= budget,
                         "thread {i} round {round}: theta={theta} epsilon={epsilon:e} \
                          bits={expected_bits} achieved diamond error {err:e} exceeds budget \
-                         {:e}",
-                        2.0 * epsilon
+                         {budget:e}"
                     );
                 }
             })

@@ -33,8 +33,9 @@ pub struct MixtureWeight {
     /// Probability of using the "lo" (under-rotation) branch; `1 - p` is the probability of
     /// using the "hi" (over-rotation) branch.
     pub p: FBig<HalfEven>,
-    /// The achieved projective-step diamond-norm error after mixing, `2*(p*Im(w_lo)^2 +
-    /// (1-p)*Im(w_hi)^2)`.
+    /// The achieved projective-step diamond-norm error after mixing, `2*(1 - p*Re(w_lo)^2 -
+    /// (1-p)*Re(w_hi)^2)` -- see [`mixture_weight`]'s own doc for why this is NOT
+    /// `2*(p*Im(w_lo)^2 + (1-p)*Im(w_hi)^2)` in general (that reduction requires `r = 1`).
     pub projective_diamond_error: FBig<HalfEven>,
 }
 
@@ -176,22 +177,6 @@ pub fn pauli_diamond_distance(
     sum
 }
 
-/// Converts a diamond-norm error budget `eps_diamond` into this crate's operator-norm-style
-/// `epsilon` convention (the one already used by `EpsilonRegion`/`GridSynthConfig::epsilon`),
-/// via the bridge `||U - V||_diamond <= 2*min(||U-V||, ||U+V||)`, i.e.
-/// `eps_diamond ~= 2*eps_spec` to first order.
-///
-/// This is the single place this conversion happens. It is a first-order/linearized bridge
-/// in general; it is exact only for the diagonal case, per [`diagonal_diamond_distance`]'s
-/// closed form. A future stage implementing the mixed-diagonal/mixed-fallback protocols
-/// must derive its working precision from the *tighter* of the requested diamond epsilon
-/// and any per-branch spec epsilon it computes downstream -- that budgeting is out of scope
-/// here.
-pub fn diamond_to_spec_epsilon(prec: Prec, eps_diamond: &FBig<HalfEven>) -> FBig<HalfEven> {
-    let two = prec.fb(FBig::try_from(2.0).unwrap());
-    eps_diamond / &two
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,9 +257,9 @@ mod tests {
         let one = PREC.ib(IBig::ONE);
         let four = to_fbig(4.0);
         let eps_sq = &epsilon * &epsilon;
-        let half_eps_sq = &eps_sq / &four;
-        let one_minus_half_eps_sq = &one - &half_eps_sq;
-        let d = PREC.fb(one_minus_half_eps_sq.sqrt() * scale.to_real(PREC).sqrt());
+        let quarter_eps_sq = &eps_sq / &four;
+        let one_minus_quarter_eps_sq = &one - &quarter_eps_sq;
+        let d = PREC.fb(one_minus_quarter_eps_sq.sqrt() * scale.to_real(PREC).sqrt());
 
         for u in sample_domegas() {
             let re_w = frame.re_w(&u);
@@ -405,12 +390,5 @@ mod tests {
         let a = [to_fbig(0.3), to_fbig(-0.1), to_fbig(0.2), to_fbig(0.4)];
         let dist = pauli_diamond_distance(PREC, &a, &a.clone());
         assert!(approx_eq(&dist, &PREC.ib(IBig::ZERO), 200));
-    }
-
-    #[test]
-    fn diamond_to_spec_epsilon_halves() {
-        let eps_diamond = to_fbig(0.02);
-        let eps_spec = diamond_to_spec_epsilon(PREC, &eps_diamond);
-        assert!(approx_eq(&eps_spec, &to_fbig(0.01), 200));
     }
 }

@@ -14,11 +14,14 @@
 //!
 //! - The *projective* step searches [`crate::protocol::fallback::SectorRegion`] (Stage 2's
 //!   region shape), but at the *wider* angular half-width used by the mixed protocols
-//!   (`sin_alpha = sqrt(eps/2)`, vs. plain fallback's `eps/2`), and via a *straddling-pair*
-//!   search (Stage 1's [`crate::protocol::mixed_diagonal::search_for_straddling_pair`], now
-//!   generic over the region type) instead of a single-candidate search -- because mixed
-//!   fallback needs two projective candidates (one under-, one over-rotating) to mix, exactly
-//!   as mixed diagonal does.
+//!   (`sin_alpha = sqrt(eps_diamond/4)`, vs. plain fallback's `eps_diamond/4` directly -- see
+//!   Prop 3.16's `sqrt(eps/2)`, in the paper's own even-split convention for the
+//!   projective-mixture term's *share* of the diamond-norm budget), and via a
+//!   *straddling-pair* search (Stage 1's
+//!   [`crate::protocol::mixed_diagonal::search_for_straddling_pair`], now generic over the
+//!   region type) instead of a single-candidate search -- because mixed fallback needs two
+//!   projective candidates (one under-, one over-rotating) to mix, exactly as mixed diagonal
+//!   does.
 //! - Each side's classical correction -- needed on that side's own "failure" branch,
 //!   analogous to plain fallback's single correction -- is itself a full *mixed-diagonal*
 //!   result (Stage 1's [`crate::protocol::mixed_diagonal::MixedDiagonalResult`], 8 twirled
@@ -45,7 +48,7 @@ use crate::protocol::mixed_diagonal::{
     assemble_result, search_for_straddling_pair, MixedDiagonalRegion, MixedDiagonalResult,
     StraddleOutcome,
 };
-use crate::protocol::mixing::{diamond_to_spec_epsilon, mixture_weight};
+use crate::protocol::mixing::mixture_weight;
 use crate::protocol::small_angle::{
     small_angle_could_help_half_angle, synth_small_angle_correction, DEFAULT_MAX_LIVE_SEARCH_K,
 };
@@ -170,13 +173,21 @@ impl AchievedDiamondError for MixedFallbackResult {
     ///
     /// For the `Mixed` variant: **not** `p * lo.achieved_diamond_error(theta) + (1 - p) *
     /// hi.achieved_diamond_error(theta)` -- each side's own projective step, taken alone, sits
-    /// only within the *wide* straddling-search tolerance (`sin_alpha = sqrt(eps/2)`) of
-    /// `theta`, not within `epsilon_diamond` itself; the whole point of the `lo`/`hi`
-    /// straddling-pair trick is that mixing their projective steps by `p` cancels that
-    /// first-order error, per this crate's `mixture_weight` closed form -- naively weighting
-    /// each side's *entire* (already-large) bound by `p`/`1-p` would throw that cancellation
-    /// away and wildly overstate the achieved error (a real bug caught by fuzzing here; see
-    /// the removed `projective_diamond_error`-only version this replaced).
+    /// only within the *wide* straddling-search tolerance (`sin_alpha =
+    /// sqrt(epsilon_diamond/4)`) of `theta`, not within `epsilon_diamond` itself; the whole
+    /// point of the `lo`/`hi` straddling-pair trick is that mixing their projective steps by
+    /// `p` cancels that first-order error, per this crate's `mixture_weight` closed form --
+    /// naively weighting each side's *entire* (already-large) bound by `p`/`1-p` would throw
+    /// that cancellation away and wildly overstate the achieved error (a real bug caught by
+    /// fuzzing here; see the removed `projective_diamond_error`-only version this replaced).
+    ///
+    /// Budget accounting (an even split of `epsilon_diamond`, mirroring plain fallback's):
+    /// the projective-mixture term is `<= 2*sin_alpha^2 = epsilon_diamond/2` regardless of
+    /// `p`, and each side's own failure term is weighted so it contributes at most
+    /// `epsilon_diamond/2` in total (see `build_side`'s `epsilon_for_correction`) --
+    /// `epsilon_diamond/2 + epsilon_diamond/2 = epsilon_diamond` exactly, tight at the
+    /// boundary (subject to the same `Exact`-fast-path caveat documented just above for the
+    /// non-`Mixed` case, and the analogous one on `mixed_diagonal::assemble_result`).
     ///
     /// Correct decomposition, mirroring the paper's additive `eq:fallback-mixing-terms`
     /// budget split: the (quadratically small) projective-mixture term from `mixture_weight`,
@@ -261,7 +272,7 @@ fn build_side(
     projective_unitary: DOmegaUnitary,
     theta_z_x: &FBig<HalfEven>,
     theta_z_y: &FBig<HalfEven>,
-    epsilon_spec: &FBig<HalfEven>,
+    epsilon_diamond: &FBig<HalfEven>,
     config: &mut GridSynthConfig,
 ) -> MixedFallbackSide {
     let v = projective_unitary.w().clone();
@@ -281,9 +292,14 @@ fn build_side(
     let sin_neg_theta_b_half =
         prec.fb(prec.fb(theta_z_y * &cos_half_phi) + prec.fb(theta_z_x * &sin_half_phi));
 
-    // Same ep2 = (eps/2)/|v|^2 recipe as plain fallback's correction budget.
+    // The other half of the even split (mirroring plain fallback's correction budget, see
+    // `synth_fallback`'s doc comment for the accounting): `epsilon_diamond/2` divided by
+    // `v_norm_sq = 1 - achieved_success_probability` so this side's failure-weighted
+    // contribution comes out to exactly `epsilon_diamond/2`. `MixedDiagonalRegion`'s
+    // parameter is itself a diamond-norm budget (see its own doc comment), so no norm
+    // conversion applies here.
     let two = prec.fb(FBig::try_from(2.0).unwrap());
-    let epsilon_for_correction = (epsilon_spec / &two) / &v_norm_sq;
+    let epsilon_for_correction = (epsilon_diamond / &two) / &v_norm_sq;
 
     // Small-angle fast path (extends PR #3's mixed-diagonal optimization to this correction
     // step): the residual angle `theta_B` is frequently small relative to
@@ -295,25 +311,26 @@ fn build_side(
     // as `mixed_diagonal::synth_mixed_diagonal` already does for its own dispatch -- so this
     // can only ever match or beat the previous (even-split-only) behavior, never regress it.
     //
-    // Units: `epsilon_for_correction` is this crate's spec-style epsilon (it feeds directly
-    // into `MixedDiagonalRegion`, which expects that convention), whereas
-    // `SmallAngleRegion`/`synth_small_angle_correction` expect a diamond-norm budget directly
-    // (see `small_angle`'s own docs on why no `diamond_to_spec_epsilon` conversion applies
-    // there) -- so it must be converted back via the inverse of `diamond_to_spec_epsilon`
-    // (`eps_diamond = 2*eps_spec`) before use here.
-    let delta_for_correction = &two * &epsilon_for_correction;
-    let correction =
-        if small_angle_could_help_half_angle(prec, &delta_for_correction, &sin_neg_theta_b_half) {
-            synth_small_angle_correction(
-                config,
-                &cos_neg_theta_b_half,
-                &sin_neg_theta_b_half,
-                &delta_for_correction,
-                DEFAULT_MAX_LIVE_SEARCH_K,
-            )
-        } else {
-            None
-        };
+    // `SmallAngleRegion`/`synth_small_angle_correction` and `MixedDiagonalRegion` both take a
+    // diamond-norm mixture budget directly (this crate's one convention -- see
+    // `CLAUDE.md`'s "Accuracy convention" section), so both branches of this correction now
+    // receive the identical `epsilon_for_correction` value: no conversion between them, and
+    // no separate variable for one branch's "diamond" view of the same number.
+    let correction = if small_angle_could_help_half_angle(
+        prec,
+        &epsilon_for_correction,
+        &sin_neg_theta_b_half,
+    ) {
+        synth_small_angle_correction(
+            config,
+            &cos_neg_theta_b_half,
+            &sin_neg_theta_b_half,
+            &epsilon_for_correction,
+            DEFAULT_MAX_LIVE_SEARCH_K,
+        )
+    } else {
+        None
+    };
 
     let correction = correction.unwrap_or_else(|| {
         let exact_scale = ZRootTwo::new(IBig::from(1), IBig::from(0));
@@ -333,13 +350,20 @@ fn build_side(
             config.verbose,
             config.measure_time,
         );
+        // Half the correction region's own budget -- see `search_for_straddling_pair`'s
+        // `phase_tolerance` doc (a ring-exact candidate's diamond distance is exactly
+        // 2*|Im(w)|), same treatment as `even_split_search`'s and this function's own
+        // top-level `phase_tolerance`. Pre-existing bug on `develop` (this call passed
+        // `epsilon_for_correction` unhalved), worsened by this PR doubling
+        // `epsilon_for_correction`'s value -- fixed here rather than left in place.
+        let correction_phase_tolerance = &epsilon_for_correction / &two;
         let correction_outcome = search_for_straddling_pair(
             &correction_region,
             &correction_unit_disk,
             &correction_transform,
             config,
             &correction_wframe,
-            &epsilon_for_correction,
+            &correction_phase_tolerance,
         );
         assemble_result(prec, correction_outcome, &correction_wframe)
     });
@@ -371,13 +395,20 @@ pub fn synth_mixed_fallback(
 ) -> Option<MixedFallbackResult> {
     let mut config = config_from_theta_epsilon(theta, epsilon_diamond, seed, verbose, false);
     let prec = config.prec;
-    let epsilon_spec = diamond_to_spec_epsilon(prec, &config.epsilon);
+    // Cloned once, up front: `build_side` below also takes `&mut config`, and a borrow of
+    // `config.epsilon` can't coexist with a mutable borrow of all of `config` in the same
+    // call -- easier to keep one owned diamond-norm-budget value around (under its own name,
+    // distinct from the `epsilon_diamond: f64` parameter above) than to re-derive it, or
+    // re-clone it, at each of the several places below that need it.
+    let epsilon_diamond_fbig = config.epsilon.clone();
 
-    // Mixed protocols' wider angular half-width: sin(alpha) = sqrt(eps/2), vs. plain
-    // fallback's eps/2 (Prop 3.16 vs. Prop 3.9).
+    // Mixed protocols' wider angular half-width: an even split gives the projective-mixture
+    // term (`2*sin_alpha^2`, see the `AchievedDiamondError` impl's accounting doc) a share
+    // `epsilon_diamond/2` of the total budget, so `sin_alpha = sqrt(epsilon_diamond/4)` --
+    // vs. plain fallback's `sin_alpha = epsilon_diamond/4` directly (Prop 3.16 vs. Prop 3.9).
     let two = prec.fb(FBig::try_from(2.0).unwrap());
-    let half_eps = &epsilon_spec / &two;
-    let sin_alpha = half_eps.sqrt();
+    let four = prec.fb(FBig::try_from(4.0).unwrap());
+    let sin_alpha = (&epsilon_diamond_fbig / &four).sqrt();
 
     let scale = ZRootTwo::new(IBig::from(1), IBig::from(0));
     let sector_region = SectorRegion::new(prec, &config.theta, q, sin_alpha, scale.clone());
@@ -390,13 +421,17 @@ pub fn synth_mixed_fallback(
         config.verbose,
         config.measure_time,
     );
+    // Half the overall diamond-norm budget -- see `search_for_straddling_pair`'s
+    // `phase_tolerance` doc (an exact-ring candidate's diamond distance is exactly
+    // 2*|Im(w)|), same value this crate has always used here.
+    let phase_tolerance = &epsilon_diamond_fbig / &two;
     let outcome = search_for_straddling_pair(
         &sector_region,
         &unit_disk,
         &transform,
         &mut config,
         &wframe,
-        &epsilon_spec,
+        &phase_tolerance,
     );
 
     match outcome {
@@ -420,8 +455,22 @@ pub fn synth_mixed_fallback(
             let theta_z_x = prec.fb(neg_theta_half.cos());
             let theta_z_y = prec.fb(neg_theta_half.sin());
 
-            let lo_side = build_side(prec, lo, &theta_z_x, &theta_z_y, &epsilon_spec, &mut config);
-            let hi_side = build_side(prec, hi, &theta_z_x, &theta_z_y, &epsilon_spec, &mut config);
+            let lo_side = build_side(
+                prec,
+                lo,
+                &theta_z_x,
+                &theta_z_y,
+                &epsilon_diamond_fbig,
+                &mut config,
+            );
+            let hi_side = build_side(
+                prec,
+                hi,
+                &theta_z_x,
+                &theta_z_y,
+                &epsilon_diamond_fbig,
+                &mut config,
+            );
 
             Some(MixedFallbackResult::Mixed {
                 lo: lo_side,
@@ -527,22 +576,22 @@ mod tests {
     // Extends PR #3's small-angle optimization (identity pinned as one branch) to mixed
     // fallback's per-side correction step. Passing the identity as the "projective"
     // candidate makes the residual angle exactly the outer `theta`, so a small `theta`
-    // relative to the (spec-converted) correction budget puts `build_side` squarely in the
+    // relative to the correction budget puts `build_side` squarely in the
     // small-angle-eligible regime -- mirrors
     // `small_angle::tests::small_angle_beats_mixed_diagonal_for_small_theta`, but exercised
     // through `build_side` itself (i.e. through the half-angle entry points, not the raw-f64
-    // ones) so a units mistake in the diamond<->spec conversion at that boundary would show up
-    // here as a correctness failure, not just a missed optimization.
+    // ones) so a units mistake at that boundary would show up here as a correctness
+    // failure, not just a missed optimization.
     #[test]
     fn build_side_correction_beats_even_split_for_small_residual() {
         use crate::config::config_from_theta_epsilon;
         use crate::protocol::mixed_diagonal::even_split_search;
 
-        // `build_side`'s residual-correction budget is `delta_for_correction =
-        // 2*epsilon_for_correction = 2*(epsilon_spec/2) = epsilon_spec = delta/2` (when the
-        // "projective" step is the identity, `v_norm_sq = 1`, so `epsilon_for_correction =
-        // (epsilon_spec/2)/1`; see `build_side`'s own units comment). `delta = 2e-4` makes
-        // that budget `1e-4` -- the exact `(theta, delta)` pair already confirmed, in
+        // `build_side`'s residual-correction budget is `epsilon_for_correction =
+        // (epsilon_diamond/2)/v_norm_sq` (see `build_side`'s own doc comment). With the
+        // identity as the "projective" step, `v = 0`, so `v_norm_sq = 1` and the budget is
+        // simply `epsilon_diamond/2 = delta/2`. `delta = 2e-4` makes that budget `1e-4` --
+        // the exact `(theta, delta)` pair already confirmed, in
         // `small_angle::tests::synth_small_angle_finds_a_mixed_result_for_small_theta`, to
         // find a live-search candidate within `DEFAULT_MAX_LIVE_SEARCH_K`.
         let theta = 1e-3_f64;
@@ -550,28 +599,27 @@ mod tests {
 
         let mut config = config_from_theta_epsilon(theta, delta, 7, false, false);
         let prec = config.prec;
-        let epsilon_spec = diamond_to_spec_epsilon(prec, &config.epsilon);
 
         let two = prec.fb(FBig::try_from(2.0).unwrap());
         let neg_theta_half = -prec.fb(&config.theta / &two);
         let theta_z_x = prec.fb(neg_theta_half.clone().cos());
         let theta_z_y = prec.fb(neg_theta_half.sin());
 
+        let epsilon_diamond = config.epsilon.clone();
         let side = build_side(
             prec,
             DOmegaUnitary::identity(),
             &theta_z_x,
             &theta_z_y,
-            &epsilon_spec,
+            &epsilon_diamond,
             &mut config,
         );
 
-        // The identity projective step means `v = 0`, so `epsilon_for_correction =
-        // (epsilon_spec/2)/1 = epsilon_spec/2` -- reproduce that here purely to build the
-        // even-split comparison at the same (spec-style) budget `build_side` itself used.
-        let epsilon_for_correction = &epsilon_spec / &two;
-        let even_split =
-            even_split_search(theta, fbig_to_f64(&epsilon_for_correction) * 2.0, 7, false);
+        // Reproduce `build_side`'s own `epsilon_for_correction` (identity projective step,
+        // `v_norm_sq = 1`) purely to build the even-split comparison at the same budget
+        // `build_side` itself used -- both now diamond-norm, no conversion between them.
+        let epsilon_for_correction = &config.epsilon / &two;
+        let even_split = even_split_search(theta, fbig_to_f64(&epsilon_for_correction), 7, false);
 
         let small_cost = fbig_to_f64(&side.correction.expected_t_count());
         let even_cost = fbig_to_f64(&even_split.expected_t_count());
@@ -590,10 +638,7 @@ mod tests {
             .with_precision(prec.bits())
             .value();
         let achieved = side.correction.achieved_diamond_error(&theta_fbig);
-        let budget = FBig::<HalfEven>::try_from(2.0 * fbig_to_f64(&epsilon_for_correction))
-            .unwrap()
-            .with_precision(prec.bits())
-            .value();
+        let budget = epsilon_for_correction;
         assert!(
             achieved <= budget.clone() * FBig::<HalfEven>::try_from(1.5).unwrap(),
             "achieved error {achieved} exceeds budget {budget}"

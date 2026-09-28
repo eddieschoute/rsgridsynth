@@ -20,7 +20,7 @@ use crate::gridsynth::{process_solution_candidate, setup_regions_and_transform, 
 use crate::gridsynth::{UnitDisk, UprightTransform};
 use crate::math::solve_quadratic;
 use crate::normal_form::{conjugate_by_clifford, Clifford};
-use crate::protocol::mixing::{diamond_to_spec_epsilon, mixture_weight};
+use crate::protocol::mixing::mixture_weight;
 use crate::region::Ellipse;
 use crate::ring::{DOmega, DRootTwo, ZRootTwo};
 use crate::synthesis_of_clifford_t::decompose_domega_unitary;
@@ -65,6 +65,13 @@ fn matrix_multiply_2x2(
 /// - `h = sqrt(s) - d` (radial semi-axis: exact, not the asymptotic `eps^2*sqrt(s)/8`).
 /// - `c = sqrt(s * eps/2)` (tangential semi-axis: exact circle-chord half-length at `Re(w) =
 ///   d`, derived from `sqrt(s - d^2) = sqrt(s - s*(1-eps/2)) = sqrt(s*eps/2)`).
+///
+/// `eps` is a **diamond-norm** budget (this crate's one tolerance convention -- see
+/// `CLAUDE.md`'s "Accuracy convention" section): every admissible candidate has `1 - Re(w)^2
+/// <= eps/2` by the cap above, and the mixture error (a convex combination of two such
+/// candidates' `1 - Re(w)^2` terms, see [`crate::protocol::mixing::mixture_weight`]) is then
+/// `<= eps` exactly, tight at the boundary. There is no operator-norm/"spec" variant of this
+/// parameter and no conversion applied to it anywhere.
 ///
 /// Both branches of the mixed protocol (under- and over-rotation) share this single region;
 /// which branch a solved candidate belongs to is decided later by the sign of `Im(w)`, not
@@ -246,8 +253,10 @@ pub(crate) enum StraddleOutcome {
 ///
 /// `phase_tolerance` bounds how far off-angle (in `|Im(w)|`) an exact-ring-unitary candidate
 /// (`|z| == 1`, see below) may be before the "no mixing needed" fast path is allowed to claim
-/// it as the final answer -- callers should pass the same spec epsilon used to build `region`.
-/// See the fast path's inline comment for why this check exists.
+/// it as the final answer -- callers should pass **half** the diamond-norm budget `region` was
+/// built for: such a candidate's diamond distance to the target is exactly `2*|Im(w)|` (since
+/// `Re(w)^2 + Im(w)^2 = 1` when `|z| == 1`), so `|Im(w)| <= budget/2` is the diamond-consistent
+/// threshold. See the fast path's inline comment for why this check exists.
 pub(crate) fn search_for_straddling_pair<A: Region + std::fmt::Debug>(
     region: &A,
     unit_disk: &UnitDisk,
@@ -671,10 +680,11 @@ pub fn synth_mixed_diagonal(
 /// the cheaper choice); call this directly only to bypass that dispatch, e.g. to reproduce a
 /// benchmark against the plain even-split protocol.
 ///
-/// `epsilon_diamond` is converted to this crate's operator-norm-style `epsilon` convention
-/// (via [`diamond_to_spec_epsilon`]) before building the search region. Only exact-phase
-/// synthesis (`PhaseMode::Exact`) is implemented at this stage; `up_to_phase` mixing is out
-/// of scope.
+/// `epsilon_diamond` is passed straight into [`MixedDiagonalRegion::new`] with no conversion:
+/// that region's cap already bounds the mixture's diamond-norm error by `epsilon_diamond`
+/// exactly (see the struct's own doc comment), so there is no separate "spec" epsilon to
+/// derive here. Only exact-phase synthesis (`PhaseMode::Exact`) is implemented at this stage;
+/// `up_to_phase` mixing is out of scope.
 ///
 /// # Panics
 /// Panics if the internal search exceeds its (very generous) bound on `k` without finding a
@@ -687,21 +697,23 @@ pub fn even_split_search(
     verbose: bool,
 ) -> MixedDiagonalResult {
     // `config_from_theta_epsilon` is reused purely as a scaffold: it parses `theta` exactly,
-    // and sizes working precision from the decimal magnitude of its `epsilon` argument, which
-    // is close enough to the actual (post-conversion) spec epsilon for that purpose. The
-    // *value* stored in `config.epsilon` here is still the diamond-norm epsilon; the spec
-    // epsilon actually used to build the region is derived from it just below.
+    // and sizes working precision from the decimal magnitude of its `epsilon` argument. Both
+    // that sizing and `config.epsilon` itself are the diamond-norm budget this function
+    // actually uses -- no further conversion is applied anywhere below.
     let mut config = config_from_theta_epsilon(theta, epsilon_diamond, seed, verbose, false);
     let prec = config.prec;
-    let epsilon_spec = diamond_to_spec_epsilon(prec, &config.epsilon);
 
     let scale = ZRootTwo::new(IBig::from(1), IBig::from(0));
-    let region = MixedDiagonalRegion::new(prec, &config.theta, &epsilon_spec, scale.clone());
+    let region = MixedDiagonalRegion::new(prec, &config.theta, &config.epsilon, scale.clone());
     let unit_disk = UnitDisk::new(prec, scale);
     let wframe = WFrame::new(prec, &config.theta);
 
     let transformed =
         setup_regions_and_transform(&region, &unit_disk, config.verbose, config.measure_time);
+
+    // Half the region's budget -- see `search_for_straddling_pair`'s `phase_tolerance` doc.
+    let two = prec.fb(FBig::try_from(2.0).unwrap());
+    let phase_tolerance = &config.epsilon / &two;
 
     let outcome = search_for_straddling_pair(
         &region,
@@ -709,7 +721,7 @@ pub fn even_split_search(
         &transformed,
         &mut config,
         &wframe,
-        &epsilon_spec,
+        &phase_tolerance,
     );
 
     assemble_result(prec, outcome, &wframe)
@@ -781,6 +793,14 @@ mod tests {
         let transformed =
             setup_regions_and_transform(&region, &unit_disk, config.verbose, config.measure_time);
         (region, unit_disk, transformed, wframe, config)
+    }
+
+    /// The diamond-consistent `phase_tolerance` for a region built with diamond-norm budget
+    /// `epsilon` -- half the budget, per `search_for_straddling_pair`'s doc comment. Matches
+    /// what `even_split_search` itself passes.
+    fn half_epsilon(prec: Prec, epsilon: &FBig<HalfEven>) -> FBig<HalfEven> {
+        let two = prec.fb(FBig::try_from(2.0).unwrap());
+        epsilon / &two
     }
 
     // ---- Task 1: ellipse containment ----
@@ -874,7 +894,7 @@ mod tests {
             let (region, unit_disk, transformed, wframe, mut config) =
                 setup(theta_f64, epsilon, 42 + k as u64);
 
-            let phase_tolerance = config.epsilon.clone();
+            let phase_tolerance = half_epsilon(config.prec, &config.epsilon);
             let outcome = search_for_straddling_pair(
                 &region,
                 &unit_disk,
@@ -908,7 +928,7 @@ mod tests {
             let epsilon = 1e-6;
             let (region, unit_disk, transformed, wframe, mut config) = setup(theta_f64, epsilon, 7);
 
-            let phase_tolerance = config.epsilon.clone();
+            let phase_tolerance = half_epsilon(config.prec, &config.epsilon);
             let outcome = search_for_straddling_pair(
                 &region,
                 &unit_disk,
@@ -932,7 +952,7 @@ mod tests {
         let epsilon = 1e-6;
         let (region, unit_disk, transformed, wframe, mut config) = setup(theta_f64, epsilon, 99);
 
-        let phase_tolerance = config.epsilon.clone();
+        let phase_tolerance = half_epsilon(config.prec, &config.epsilon);
         let outcome = search_for_straddling_pair(
             &region,
             &unit_disk,
@@ -986,7 +1006,7 @@ mod tests {
         for (theta_f64, epsilon, seed) in cases {
             let (region, unit_disk, transformed, wframe, mut config) =
                 setup(theta_f64, epsilon, seed);
-            let phase_tolerance = config.epsilon.clone();
+            let phase_tolerance = half_epsilon(config.prec, &config.epsilon);
             let outcome = search_for_straddling_pair(
                 &region,
                 &unit_disk,
@@ -1097,7 +1117,7 @@ mod tests {
         let epsilon = 1e-5;
         let (region, unit_disk, transformed, wframe, mut config) = setup(theta_f64, epsilon, 55);
 
-        let phase_tolerance = config.epsilon.clone();
+        let phase_tolerance = half_epsilon(config.prec, &config.epsilon);
         let outcome = search_for_straddling_pair(
             &region,
             &unit_disk,

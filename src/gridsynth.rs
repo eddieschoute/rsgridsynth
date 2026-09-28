@@ -72,6 +72,19 @@ pub enum PhaseMode {
     Shifted, // do scaling
 }
 
+/// The plain single-candidate search region: a disc-and-cap intersection expressing "close
+/// enough to the target direction, and no farther out than `scale`" (eq. 14 in Ross &
+/// Selinger).
+///
+/// `epsilon` is a **diamond-norm** budget (this crate's one tolerance convention -- see
+/// `CLAUDE.md`'s "Accuracy convention" section and [`crate::accuracy::diagonal_diamond_distance`],
+/// its normative definition), not an operator-norm one. The cap this region enforces is
+/// `Re(w) >= d = sqrt(1 - epsilon^2/4) * sqrt(scale)` (`inside`, below); composing that with
+/// `diagonal_diamond_distance = 2*sqrt(1 - Re(w)^2)` gives, at the cap boundary with
+/// `scale = 1`, `2*sqrt(epsilon^2/4) = epsilon` **exactly** -- so a candidate this region
+/// accepts has diamond-norm distance to the target of at most `epsilon`, tight at the
+/// boundary (operator-norm distance there is only `sqrt(2 - 2*Re(w)) ~= epsilon/2`; do not
+/// confuse the two).
 #[derive(Debug)]
 pub struct EpsilonRegion {
     _theta: FBig<HalfEven>,
@@ -134,16 +147,19 @@ impl EpsilonRegion {
         let one = prec.fb(FBig::try_from(1.0).unwrap());
         let four = prec.fb(FBig::try_from(4.0).unwrap());
         let epsilon_squared = &epsilon * &epsilon;
-        let half_eps_sq = &epsilon_squared / &four;
+        // Named for what it actually is (`epsilon^2 / 4`), not "half" -- a misnomer that
+        // invited exactly the kind of off-by-2 this crate's diamond-norm epsilon convention
+        // had to be untangled from (see `CLAUDE.md`'s "Accuracy convention" section).
+        let quarter_eps_sq = &epsilon_squared / &four;
         // `epsilon` >= 2 (or a derived epsilon that overshoots it, e.g. the fallback
         // protocol's rescaled correction-step epsilon on a near-degenerate candidate) is
         // already past the point where any point of the disk fails to qualify: the sane
         // mathematical limit of the formula below is `d = 0` (no angular restriction at
         // all), not a negative radicand. Clamp rather than let a tiny-precision rounding
         // artifact (or a legitimately oversized derived epsilon) panic in `sqrt_fbig`.
-        let one_minus_half_eps_sq = (one - half_eps_sq).max(prec.ib(IBig::ZERO));
+        let one_minus_quarter_eps_sq = (one - quarter_eps_sq).max(prec.ib(IBig::ZERO));
         let scale_to_real = scale.to_real(prec);
-        let d = one_minus_half_eps_sq.sqrt() * scale_to_real.sqrt();
+        let d = one_minus_quarter_eps_sq.sqrt() * scale_to_real.sqrt();
 
         let neg_z_y: FBig<HalfEven> = -(z_y.clone());
         let zero: FBig<HalfEven> = prec.ib(IBig::ZERO);

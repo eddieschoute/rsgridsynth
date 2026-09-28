@@ -161,3 +161,72 @@ arbitrary decimal precision (`--dps`) the algorithm can target; the library's `f
 `e^{iπ/8}` (`Shifted`), which uses differently-scaled epsilon-region/unit-disk pairs. When
 `up_to_phase` is set, `gridsynth_gates` runs both and keeps whichever produced fewer `T` gates;
 `GridSynthResult::global_phase` records which branch won.
+
+### Accuracy convention
+
+This crate has exactly **one** tolerance convention: **diamond-norm distance**
+(`||Z_theta - U||_diamond`, `accuracy::diagonal_diamond_distance`'s closed form
+`2*sqrt(1 - Re(w)^2)` is its normative definition). `GridSynthConfig::epsilon` and every
+`protocol::synth_*` entry point's `epsilon`/`epsilon_diamond`/`delta` parameter mean this same
+quantity — there is no operator-norm variant anywhere in the crate, and no conversion between
+conventions. (There used to be: `protocol::mixing::diamond_to_spec_epsilon` halved a diamond
+budget into a supposedly "operator-norm-style" one before feeding it to
+`EpsilonRegion`/`MixedDiagonalRegion` — but those regions' caps were *already* diamond-exact,
+so the halving was a bug, not a convention. It was removed; do not reintroduce a norm
+conversion of this kind.)
+
+The bound is **tight**, not loose: `EpsilonRegion`'s cap makes `achieved_diamond_error(theta)
+<= epsilon` exact, with equality reachable at the cap boundary (empirically, achieved/epsilon
+ratios up to ~0.9998 have been observed in this crate's own test suite). Because of that, any
+test asserting `achieved <= epsilon` needs a *measurement-noise* margin, not algorithmic
+slack — working precision scales as `12 * log10(1/epsilon)` bits
+(`config::prec_bits_for_epsilon`), and since `1 - Re(w)^2 ~= epsilon^2/4` near the boundary, a
+fixed absolute rounding error becomes a *relative* error in the reported distance that grows
+as `epsilon` shrinks below ~1e-6. See `measurement_slack` (duplicated across
+`tests/accuracy_fuzz_test.rs`, `tests/integration_test.rs`, `tests/concurrency_test.rs`, and
+`tests/protocol_accuracy_fuzz_test.rs`) for the derivation and the margin this crate uses.
+
+One real accuracy gap, not a convention issue: a straddling-pair search
+(`mixed_diagonal::search_for_straddling_pair`, used by mixed diagonal, fallback, and mixed
+fallback) can degenerate to returning a single deterministic candidate (an exact-ring-unitary
+fast-path hit, or `mixture_weight`'s `p` collapsing to 0/1) whose own diamond distance is
+bounded only by the search region's cap directly, not by the tighter mixing-theorem guarantee
+a genuine two-branch mixture gets. `tests/protocol_accuracy_fuzz_test.rs` documents and
+deliberately does not paper over this (see its `Mixed`-vs-`Exact` branches and issue #8) — do
+not "fix" it by loosening an assertion elsewhere without checking whether it is this same,
+already-known case.
+
+### Protocols (`src/protocol/`)
+
+Beyond the plain single-candidate pipeline above, `src/protocol/` implements three
+higher-throughput rotation-synthesis protocols from Kliuchnikov, Lauter, Minko, Paetznick,
+Petit (arXiv:2203.10064v2), each trading a lower expected T-count for either a classical coin
+flip, a measurement, or both. All are diamond-norm accurate to the same one convention above.
+
+- **`mixing.rs`** — shared math: `WFrame`/`diagonal_diamond_distance` (re-exported from
+  `accuracy.rs`), `mixture_weight` (Thm 3.12's closed-form classical mixing probability for a
+  straddling pair), `pauli_diamond_distance`.
+- **`mixed_diagonal.rs`** (Stage 1) — finds two candidates straddling the target (one
+  under-, one over-rotated) and mixes them so first-order error cancels, at roughly half the
+  T-count of the plain path for the same budget. `MixedDiagonalRegion`'s cap bounds the
+  mixture's diamond error by its `epsilon` parameter exactly. `synth_mixed_diagonal` dispatches
+  to the small-angle fast path (below) when it's likely cheaper, falling back to the always-
+  correct `even_split_search`.
+- **`fallback.rs`** (Stage 2) — Bocharov-Roetteler-Svore's projective/fallback protocol: a
+  wide-tolerance candidate with `|z|^2 >= q` succeeds with probability `|z|^2`; on failure (rare,
+  `1 - |z|^2`), a classical "correction" fixes the residual angle. Budget is split evenly:
+  `sin_alpha = epsilon/4` bounds the success term at `epsilon/2`, and the correction region's
+  `epsilon_for_correction = (epsilon/2)/|v|^2` bounds the failure term's weighted contribution
+  at `epsilon/2` too (the `1/|v|^2` cancels the failure probability weight) — summing to
+  `epsilon` exactly.
+- **`mixed_fallback.rs`** (Stage 3) — composes Stage 1's straddling-pair search (at fallback's
+  wider `sin_alpha = sqrt(epsilon/4)`, per Prop 3.16) with Stage 2's correction step, whose
+  budget is a full mixed-diagonal search rather than a single-candidate one. `build_side` feeds
+  the identical `epsilon_for_correction` to both its small-angle-fast-path and even-split
+  branches — no per-branch conversion.
+- **`small_angle.rs`** (fast path used by both Stage 1 and Stage 3's correction step) —
+  `SmallAngleRegion`/`synth_small_angle` pin the identity as one mixture branch when `theta` is
+  small relative to the whole diamond-norm budget `delta`, costing far fewer T gates than an
+  even split when it applies. `delta` here is the *whole mixture's* budget, compared directly
+  against `mixture_weight`'s `projective_diamond_error` — same convention as everywhere else,
+  no conversion.

@@ -80,6 +80,19 @@ use rsgridsynth::protocol::{
 };
 use rsgridsynth::unitary::DOmegaUnitary;
 
+// Shares `measurement_slack` with `tests/common/mod.rs` via an explicit `#[path]` rather
+// than keeping a second hand-duplicated copy: this example and the `tests/` targets are
+// separate compilation units, but Cargo (via `rustc`'s `#[path]`) will still happily
+// compile the same source file into both. `#[path]` resolves relative to this file's own
+// directory only when the `mod` item sits at the file's top level (not nested inside
+// another `mod`), hence declaring it here rather than inside `debug_tests` below, and
+// `#[cfg(test)]` since only that (test-only) module uses it.
+#[cfg(test)]
+#[path = "../tests/common/mod.rs"]
+mod common;
+#[cfg(test)]
+use common::measurement_slack;
+
 /// Fixed, generous working precision for this file's independent verification arithmetic.
 /// Precision is explicit everywhere in this crate now (no ambient/global state), so this
 /// file picks its own -- deliberately larger than any epsilon tested below needs, since the
@@ -770,15 +783,28 @@ mod debug_tests {
         );
     }
 
-    /// Calibration check: what does the EXISTING, unmodified plain-diagonal protocol's
-    /// `epsilon` parameter actually correspond to in diamond-norm terms?
+    use super::measurement_slack;
+
+    /// Calibration check, now asserting: `EpsilonRegion`'s epsilon parameter IS a
+    /// diamond-norm budget (not the "operator-norm-style" one the crate used to claim), so
+    /// the achieved diamond distance of the plain-diagonal protocol's unmodified output must
+    /// never exceed it (up to the measurement slack above). See `CLAUDE.md`'s "Accuracy
+    /// convention" section.
+    ///
+    /// `up_to_phase=true` (`PhaseMode::Shifted`) is deliberately not exercised here: this
+    /// module's whole point is to stay independent of the crate's own
+    /// `accuracy::gate_seq_diamond_error`, but that function is also the only place the
+    /// `e^{i pi/8}` phase correction needed to compare a `Shifted` candidate against the
+    /// plain target is implemented -- reimplementing it independently here would risk a
+    /// subtly wrong check. `up_to_phase=true` is already covered, via the crate's own
+    /// (correct) phase handling, by `tests/accuracy_fuzz_test.rs::fuzz_accuracy_up_to_phase`.
     #[test]
     fn plain_diagonal_epsilon_convention_calibration() {
         use rsgridsynth::config::config_from_theta_epsilon;
         use rsgridsynth::gridsynth::gridsynth_gates;
 
         for &theta_f64 in &[0.1_f64, 0.7, 1.3, 2.5] {
-            for &eps in &[1e-3_f64, 1e-4, 1e-5, 1e-6] {
+            for &eps in &[1e-2_f64, 1e-3, 1e-4, 1e-5, 1e-6] {
                 let mut config = config_from_theta_epsilon(theta_f64, eps, 42, false, false);
                 let result = gridsynth_gates(&mut config);
                 let theta = to_fbig(theta_f64);
@@ -789,6 +815,12 @@ mod debug_tests {
                     "theta={theta_f64}, epsilon_param={eps}, achieved_diamond_distance={dd_f64}, \
                      ratio={:.4}",
                     dd_f64 / eps
+                );
+                assert!(
+                    dd_f64 <= eps * (1.0 + measurement_slack(eps)),
+                    "plain-diagonal epsilon convention broken: EpsilonRegion's cap \
+                     guarantees diamond <= epsilon exactly, got dd={dd_f64:e} for \
+                     eps={eps:e}, theta={theta_f64}"
                 );
             }
         }
