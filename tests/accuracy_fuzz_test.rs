@@ -16,6 +16,9 @@
 //! form. That way a bug in either derivation would show up as a disagreement, not just as both
 //! being wrong in the same way.
 
+mod common;
+
+use common::measurement_slack;
 use dashu_base::Approximation;
 use dashu_float::round::mode::HalfEven;
 use dashu_float::FBig;
@@ -42,19 +45,6 @@ fn fbig_to_f64(x: &FBig<HalfEven>) -> f64 {
         Approximation::Exact(v) => v,
         Approximation::Inexact(v, _) => v,
     }
-}
-
-/// Relative slack for an `achieved <= epsilon`-style diamond-norm assertion. The *bound* is
-/// exact -- `EpsilonRegion`'s cap `Re(w) >= sqrt(1 - eps^2/4)` gives
-/// `diagonal_diamond_distance = 2*sqrt(1 - Re(w)^2) <= eps`, with equality on the boundary.
-/// The *evaluation* is not: working precision is only `12 * log10(1/epsilon)` bits
-/// (`config::prec_bits_for_epsilon`), and since `1 - Re(w)^2 ~= eps^2/4`, an absolute error
-/// `2^-prec` in `Re(w)` becomes a *relative* error `~4 * 2^-prec / eps^2` in the reported
-/// distance: ~2.4e-3 at eps=1e-2 (only 24 working bits), ~6e-5 at 1e-3, ~1.4e-6 at 1e-4, below
-/// 1e-9 from 1e-6 down. A flat 1e-9 margin is therefore NOT safe at coarse epsilon.
-fn measurement_slack(epsilon: f64) -> f64 {
-    let prec_bits = (12.0 * (1.0 / epsilon).log10()).max(16.0);
-    (16.0 * 2f64.powf(-prec_bits) / (epsilon * epsilon)).max(1e-9)
 }
 
 /// The exact operator-norm counterpart of `EpsilonRegion`'s diamond-norm cap: a candidate at

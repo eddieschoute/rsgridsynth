@@ -21,6 +21,9 @@
 //! let a concurrently-running test's cache population change another test's RNG consumption
 //! and hence its golden string).
 
+mod common;
+
+use common::measurement_slack;
 use rsgridsynth::accuracy::AchievedDiamondError;
 use rsgridsynth::config::config_from_theta_epsilon;
 use rsgridsynth::gridsynth::gridsynth_gates;
@@ -35,14 +38,9 @@ fn fbig_to_f64(x: &dashu_float::FBig<dashu_float::round::mode::HalfEven>) -> f64
     }
 }
 
-/// Relative slack for an `achieved <= epsilon` diamond-norm assertion -- see
-/// `tests/accuracy_fuzz_test.rs`'s copy of this helper for the full derivation. `epsilon = 1e-2`
-/// appears in this file's epsilon list, so the coarse-precision case (~2.4e-3 relative noise) is
-/// actually exercised here, not just theoretical.
-fn measurement_slack(epsilon: f64) -> f64 {
-    let prec_bits = (12.0 * (1.0 / epsilon).log10()).max(16.0);
-    (16.0 * 2f64.powf(-prec_bits) / (epsilon * epsilon)).max(1e-9)
-}
+// `measurement_slack` (from `common`) is exercised at a genuinely coarse epsilon here:
+// `epsilon = 1e-2` is in this file's epsilon list, so the ~2.4e-3 relative-noise case is
+// actually hit, not just theoretical.
 
 /// The decisive test: many threads synthesize concurrently at very different epsilons (so a
 /// precision mix-up would be numerically obvious, not a rounding-noise-sized discrepancy),

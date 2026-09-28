@@ -1,3 +1,6 @@
+mod common;
+
+use common::measurement_slack;
 use dashu_float::round::mode::HalfEven;
 use dashu_float::FBig;
 use rsgridsynth::accuracy::AchievedDiamondError;
@@ -9,13 +12,6 @@ fn fbig_to_f64(x: &FBig<HalfEven>) -> f64 {
         dashu_base::Approximation::Exact(v) => v,
         dashu_base::Approximation::Inexact(v, _) => v,
     }
-}
-
-/// Relative slack for an `achieved <= epsilon` diamond-norm assertion -- see
-/// `tests/accuracy_fuzz_test.rs`'s copy of this helper for the full derivation.
-fn measurement_slack(epsilon: f64) -> f64 {
-    let prec_bits = (12.0 * (1.0 / epsilon).log10()).max(16.0);
-    (16.0 * 2f64.powf(-prec_bits) / (epsilon * epsilon)).max(1e-9)
 }
 
 #[test]

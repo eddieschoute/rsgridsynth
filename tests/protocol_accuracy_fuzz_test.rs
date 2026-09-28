@@ -11,6 +11,9 @@
 //! angles and a spread of diamond-norm epsilons -- from coarse (1e-2) down to 1e-15 -- checking
 //! that the achieved accuracy is within the requested budget.
 
+mod common;
+
+use common::measurement_slack;
 use dashu_base::Approximation;
 use dashu_float::round::mode::HalfEven;
 use dashu_float::FBig;
@@ -49,13 +52,8 @@ fn random_angles(seed: u64, n: usize) -> Vec<f64> {
         .collect()
 }
 
-/// Relative slack for an `achieved <= epsilon` diamond-norm assertion -- see
-/// `tests/accuracy_fuzz_test.rs`'s copy of this helper for the full derivation. `EPSILONS`
-/// above includes 1e-2, so the coarse-precision case is actually exercised here.
-fn measurement_slack(epsilon: f64) -> f64 {
-    let prec_bits = (12.0 * (1.0 / epsilon).log10()).max(16.0);
-    (16.0 * 2f64.powf(-prec_bits) / (epsilon * epsilon)).max(1e-9)
-}
+// `measurement_slack` (from `common`) is exercised at a genuinely coarse epsilon here:
+// `EPSILONS` above includes 1e-2.
 
 #[test]
 #[serial]
