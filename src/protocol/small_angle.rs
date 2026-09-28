@@ -317,14 +317,37 @@ impl SmallAngleRegion {
     ) -> Self {
         let two = prec.fb(FBig::try_from(2.0).unwrap());
         let theta_half = prec.fb(theta / &two);
-        let neg_theta_half = -prec.fb(theta_half.clone());
+        let neg_theta_half = -prec.fb(theta_half);
         let z_x: FBig<HalfEven> = prec.fb(neg_theta_half.cos());
         let z_y: FBig<HalfEven> = prec.fb(neg_theta_half.sin());
+        Self::from_half_angle(prec, z_x, z_y, delta, scale)
+    }
 
-        let sin_t = prec.fb(theta_half.sin());
+    /// Builds the same region as [`SmallAngleRegion::new`], but directly from the target
+    /// direction's negative half-angle `(z_x, z_y) = (cos(-theta/2), sin(-theta/2))`, with
+    /// `theta/2` in `[0, pi/2]` (i.e. `z_x >= 0, z_y <= 0`) -- the same canonical form
+    /// [`synth_small_angle_with_max_k`] produces via its own `f64`-`theta` canonicalization,
+    /// and what [`canonicalize_half_angle`] produces for a caller that only has a half-angle
+    /// pair to start with (e.g. mixed fallback's residual-angle correction). Avoids
+    /// recomputing `cos`/`sin` from a raw `theta` when the caller already has them, mirroring
+    /// [`crate::protocol::mixed_diagonal::MixedDiagonalRegion::from_target_direction`].
+    ///
+    /// Derives `sin(theta/2) = -z_y` and `sin(theta) = 2*sin(theta/2)*cos(theta/2) =
+    /// -2*z_x*z_y` algebraically from the half-angle pair, rather than calling `sin`/`cos`
+    /// again -- exact given exact inputs, and avoiding a second (independently rounded)
+    /// trigonometric evaluation of the same angle.
+    pub(crate) fn from_half_angle(
+        prec: Prec,
+        z_x: FBig<HalfEven>,
+        z_y: FBig<HalfEven>,
+        delta: &FBig<HalfEven>,
+        scale: ZRootTwo,
+    ) -> Self {
+        let two = prec.fb(FBig::try_from(2.0).unwrap());
+        let sin_t = -z_y.clone();
         let sin_t_sq = &sin_t * &sin_t;
         let a = delta - &(&two * &sin_t_sq);
-        let b = prec.fb(theta.sin());
+        let b = -prec.fb(&two * (&z_x * &z_y));
         let one = prec.ib(IBig::ONE);
         let c = (&one - (delta / &two)) * &b;
 
@@ -549,7 +572,7 @@ const LATE_HIT_DEBUG_MARGIN: i64 = 3;
 /// latency -- the tradeoff a compiler pipeline needs. This never costs correctness: every
 /// caller already treats `None` here as "use the always-correct even-split protocol instead"
 /// (see [`crate::protocol::mixed_diagonal::synth_mixed_diagonal`]), not a hard failure.
-const DEFAULT_MAX_LIVE_SEARCH_K: i64 = 8;
+pub(crate) const DEFAULT_MAX_LIVE_SEARCH_K: i64 = 8;
 
 /// Searches for the over-rotation branch: candidates inside `region` (so `Im(w) <= 0` by
 /// construction), scored against the fixed `(hi_re, hi_im)` branch (the identity, in every
@@ -820,25 +843,52 @@ pub fn synth_small_angle_with_max_k(
         (two_pi - theta_wrapped, true)
     };
 
-    let config = config_from_theta_epsilon(theta_pos, epsilon_diamond, seed, verbose, false);
+    let mut config = config_from_theta_epsilon(theta_pos, epsilon_diamond, seed, verbose, false);
     let prec = config.prec;
     // `delta` is the diamond-norm budget directly -- see `SmallAngleRegion::new`'s docs on
     // why no `diamond_to_spec_epsilon` conversion is applied here.
     let delta = config.epsilon.clone();
 
-    let wframe = WFrame::new(prec, &config.theta);
+    let two = prec.fb(FBig::try_from(2.0).unwrap());
+    let neg_theta_half = -prec.fb(&config.theta / &two);
+    let z_x: FBig<HalfEven> = prec.fb(neg_theta_half.cos());
+    let z_y: FBig<HalfEven> = prec.fb(neg_theta_half.sin());
+
+    let resolved_max_k = max_k.unwrap_or_else(|| 4 * prec.bits() as i64);
+    let result = synth_small_angle_core(&mut config, &z_x, &z_y, &delta, resolved_max_k)?;
+    Some(apply_x_conjugation(result, need_x_conjugate))
+}
+
+/// The shared search core behind [`synth_small_angle_with_max_k`] and
+/// [`synth_small_angle_correction`]: given an already-canonicalized negative half-angle
+/// `(z_x, z_y) = (cos(-theta/2), sin(-theta/2))` with `theta/2` in `[0, pi/2]` (i.e. `z_x >=
+/// 0, z_y <= 0`) and a diamond-norm budget `delta`, tries the identity-alone fast path, then
+/// Bothe's static table, then falls back to the live lattice search -- exactly the three
+/// stages [`synth_small_angle_with_max_k`] used to run inline, now parameterized on the
+/// half-angle pair directly instead of re-deriving it from a raw `theta` each time, and
+/// threading an existing `config` (for its diophantine cache) rather than owning a fresh one.
+/// Does *not* apply the final `X`-conjugation flag -- callers own their own canonicalization
+/// and must apply it themselves (see [`apply_x_conjugation`]).
+fn synth_small_angle_core(
+    config: &mut GridSynthConfig,
+    z_x: &FBig<HalfEven>,
+    z_y: &FBig<HalfEven>,
+    delta: &FBig<HalfEven>,
+    max_k: i64,
+) -> Option<MixedDiagonalResult> {
+    let prec = config.prec;
+    let wframe = WFrame::from_target_direction(prec, z_x.clone(), z_y.clone());
     let hi = DOmegaUnitary::identity();
     let hi_re = wframe.re_w(hi.z());
     let hi_im = wframe.im_w(hi.z());
 
     // Fast path: the identity alone already meets the budget, so no mixing is needed (or
     // beneficial) at all.
-    if diagonal_diamond_distance(prec, &hi_re) <= delta {
-        let result = MixedDiagonalResult::Exact {
+    if diagonal_diamond_distance(prec, &hi_re) <= *delta {
+        return Some(MixedDiagonalResult::Exact {
             gates: GateSeq::identity(),
             prec,
-        };
-        return Some(apply_x_conjugation(result, need_x_conjugate));
+        });
     }
 
     // Fast path: check Bothe's static over-rotation table before running the (comparatively
@@ -855,9 +905,10 @@ pub fn synth_small_angle_with_max_k(
     // table hit that fails this cheap comparison, falls through to the live search below
     // exactly as if this fast path didn't exist -- the live search's own result is never
     // worse than what shipped before this fast path was added.
-    if let Some((lo_gates, p)) = table_best_over_rotation(prec, &wframe, &hi_re, &hi_im, &delta) {
+    if let Some((lo_gates, p)) = table_best_over_rotation(prec, &wframe, &hi_re, &hi_im, delta) {
         let mean_t_count = fbig_to_f64(&p) * lo_gates.t_count() as f64;
-        let even_split_cost_estimate = (1.52 * (1.0 / epsilon_diamond).log2() - 0.01).max(0.0);
+        let delta_f64 = fbig_to_f64(delta);
+        let even_split_cost_estimate = (1.52 * (1.0 / delta_f64).log2() - 0.01).max(0.0);
         if mean_t_count <= even_split_cost_estimate {
             let one = prec.ib(IBig::ONE);
             let zero = prec.ib(IBig::ZERO);
@@ -879,7 +930,7 @@ pub fn synth_small_angle_with_max_k(
                     prec,
                 }
             };
-            return Some(apply_x_conjugation(result, need_x_conjugate));
+            return Some(result);
         }
         // Table's best qualifying candidate isn't good enough to trust outright; let the live
         // search below do its own, theta-tuned job instead -- same as a table miss.
@@ -890,46 +941,18 @@ pub fn synth_small_angle_with_max_k(
         );
     }
 
-    let resolved_max_k = max_k.unwrap_or_else(|| 4 * prec.bits() as i64);
-    synth_small_angle_live_search(
-        config,
-        prec,
-        delta,
-        wframe,
-        hi,
-        need_x_conjugate,
-        resolved_max_k,
-    )
-}
-
-/// The live lattice-search fallback tail of [`synth_small_angle_with_max_k`]: builds
-/// [`SmallAngleRegion`], runs [`search_best_over_rotation`], and assembles the final result.
-/// Factored out so it can be called both when [`table_best_over_rotation`] finds nothing
-/// usable and (identically) when it never runs at all. `max_k` is the already-resolved
-/// (non-`Option`) bound -- see [`synth_small_angle_with_max_k`] for the `Option` -> concrete
-/// value resolution.
-fn synth_small_angle_live_search(
-    mut config: GridSynthConfig,
-    prec: Prec,
-    delta: FBig<HalfEven>,
-    wframe: WFrame,
-    hi: DOmegaUnitary,
-    need_x_conjugate: bool,
-    max_k: i64,
-) -> Option<MixedDiagonalResult> {
     let scale = ZRootTwo::new(IBig::from(1), IBig::from(0));
-    let region = SmallAngleRegion::new(prec, &config.theta, &delta, scale.clone());
+    let region =
+        SmallAngleRegion::from_half_angle(prec, z_x.clone(), z_y.clone(), delta, scale.clone());
     let unit_disk = UnitDisk::new(prec, scale);
     let transformed =
         setup_regions_and_transform(&region, &unit_disk, config.verbose, config.measure_time);
 
-    let hi_re = wframe.re_w(hi.z());
-    let hi_im = wframe.im_w(hi.z());
     let lo = search_best_over_rotation(
         &region,
         &unit_disk,
         &transformed,
-        &mut config,
+        config,
         &wframe,
         &hi_re,
         &hi_im,
@@ -937,8 +960,127 @@ fn synth_small_angle_live_search(
     )?;
 
     let outcome = StraddleOutcome::Mixed(lo, Box::new(hi));
-    let result = assemble_result(prec, outcome, &wframe);
-    Some(apply_x_conjugation(result, need_x_conjugate))
+    Some(assemble_result(prec, outcome, &wframe))
+}
+
+/// Canonicalizes a raw (not necessarily canonical) negative half-angle `(z_x, z_y) =
+/// (cos(-theta/2), sin(-theta/2))` for an arbitrary real `theta` into the canonical form
+/// `[`SmallAngleRegion`] needs (`z_x >= 0, z_y <= 0`, i.e. `theta` reduced to its canonical
+/// representative `theta_pos` in `[0, pi]`), plus the two *independent* corrections a caller
+/// must apply (in order -- first [`apply_x_conjugation`], then [`apply_negation`]) to turn a
+/// result found for the canonical pair back into one valid for the original, raw pair. The
+/// half-angle-pair analogue of [`synth_small_angle_with_max_k`]'s own `f64`-`theta`-based
+/// canonicalization (reducing mod `2*pi`, then reflecting into `[0, pi]`), for a caller (mixed
+/// fallback's residual-angle correction) that only ever has `theta` as an
+/// algebraically-derived `(cos, sin)` pair, never as a raw scalar -- so this works purely from
+/// the pair, without an `atan2` round-trip.
+///
+/// Two independent corrections are needed, and conflating them (as an earlier, buggy version
+/// of this function did -- see git history) trips `mixture_weight`'s `Im(w_lo) <= 0 <=
+/// Im(w_hi)` precondition for any raw pair that needs the first one:
+///
+/// - **Negation** (`need_negate`, returned first): `(z_x, z_y)` and `(-z_x, -z_y)` represent
+///   the same channel `R_z(theta)` (adding `pi` to a half-angle adds `2*pi` to the full angle),
+///   so flipping both signs together if `z_x < 0` guarantees `z_x >= 0` without changing the
+///   channel -- but it *does* multiply the target frame's own `(Re, Im)` by `-1`, which flips
+///   the sign of `Im(w)` for every candidate measured against it. Undone by [`apply_negation`]
+///   -- a pure `lo`/`hi` relabeling (`p := 1 - p`), NOT a gate transformation: the physical
+///   gate words found are already correct (the diamond-norm error is insensitive to this
+///   global sign, per [`diagonal_diamond_distance`]'s squared-`Re(w)` closed form) -- only
+///   which one is called "lo" vs "hi" changes.
+/// - **Conjugation** (`need_x_conjugate`, returned second): after negation, `z_y =
+///   sin(-theta/2) > 0` means the (possibly already `pi`-shifted) `theta < 0`; negating
+///   `theta` is exactly `R_z(-theta) = X R_z(theta) X`, which (since `cos` is even) leaves
+///   `z_x` unchanged and flips the sign of `z_y`. Undone by [`apply_x_conjugation`], which
+///   *does* transform the gate words themselves (via `X`-conjugation), not just relabel them.
+pub(crate) fn canonicalize_half_angle(
+    prec: Prec,
+    z_x: FBig<HalfEven>,
+    z_y: FBig<HalfEven>,
+) -> (FBig<HalfEven>, FBig<HalfEven>, bool, bool) {
+    let zero = prec.ib(IBig::ZERO);
+    let need_negate = z_x < zero;
+    let (z_x, z_y) = if need_negate {
+        (-z_x, -z_y)
+    } else {
+        (z_x, z_y)
+    };
+    if z_y > zero {
+        (z_x, -z_y, need_negate, true)
+    } else {
+        (z_x, z_y, need_negate, false)
+    }
+}
+
+/// Undoes [`canonicalize_half_angle`]'s `need_negate` correction: a pure `lo`/`hi` relabeling
+/// (`p := 1 - p`) with **no** gate transformation -- see that function's own docs for why this
+/// is sound (the underlying negation is a global sign on the target frame, to which the
+/// diamond-norm error is insensitive; only the `Im(w) <= 0` sign convention that decides which
+/// branch is "lo" flips). Must be applied *after* [`apply_x_conjugation`] -- see
+/// [`canonicalize_half_angle`]'s own docs for why the two corrections compose in that order.
+fn apply_negation(result: MixedDiagonalResult, need: bool) -> MixedDiagonalResult {
+    if !need {
+        return result;
+    }
+    match result {
+        MixedDiagonalResult::Exact { .. } => result,
+        MixedDiagonalResult::Mixed { p, lo, hi, prec } => {
+            let one = prec.ib(IBig::ONE);
+            MixedDiagonalResult::Mixed {
+                p: &one - &p,
+                lo: hi,
+                hi: lo,
+                prec,
+            }
+        }
+    }
+}
+
+/// Same search as [`synth_small_angle_with_max_k`], but for a target direction known only as a
+/// (not necessarily canonical) negative half-angle `(z_x, z_y) = (cos(-theta/2),
+/// sin(-theta/2))` pair rather than a raw `f64 theta` -- e.g. mixed fallback's residual angle
+/// `theta - Arg(v)`, derived via the `atan2`-free half-angle algebra
+/// [`crate::protocol::fallback::synth_fallback`]/[`crate::protocol::mixed_fallback::build_side`]
+/// use -- and reusing an existing `config` (so the projective step's diophantine cache is
+/// shared with the correction search) instead of building a fresh one via
+/// `config_from_theta_epsilon`.
+///
+/// Returns `None` under the same conditions as [`synth_small_angle_with_max_k`]: no candidate
+/// found within `max_k` `k`-steps. Callers should fall back to the always-correct even-split
+/// [`crate::protocol::mixed_diagonal`] search in that case, exactly as
+/// [`crate::protocol::mixed_diagonal::synth_mixed_diagonal`] already does for the raw-`theta`
+/// entry point.
+pub(crate) fn synth_small_angle_correction(
+    config: &mut GridSynthConfig,
+    z_x: &FBig<HalfEven>,
+    z_y: &FBig<HalfEven>,
+    delta: &FBig<HalfEven>,
+    max_k: i64,
+) -> Option<MixedDiagonalResult> {
+    let prec = config.prec;
+    let (z_x_pos, z_y_pos, need_negate, need_x_conjugate) =
+        canonicalize_half_angle(prec, z_x.clone(), z_y.clone());
+    let result = synth_small_angle_core(config, &z_x_pos, &z_y_pos, delta, max_k)?;
+    let result = apply_x_conjugation(result, need_x_conjugate);
+    Some(apply_negation(result, need_negate))
+}
+
+/// Cheap, O(1), search-free pre-check mirroring [`small_angle_could_help`], but for a target
+/// direction known only as a negative half-angle `(z_x, z_y) = (cos(-theta/2),
+/// sin(-theta/2))` pair -- see [`synth_small_angle_correction`] for why that's the form mixed
+/// fallback's residual-angle correction has to work with.
+///
+/// `1 - cos(theta) = 2*sin(theta/2)^2 = 2*z_y^2`, so this is exactly
+/// [`small_angle_could_help`]'s condition `delta > 1 - cos(theta)` restated in terms of `z_y`
+/// -- and, since squaring erases sign, it needs no canonicalization of `(z_x, z_y)` first
+/// (unlike [`synth_small_angle_correction`] itself, which does canonicalize before searching).
+pub(crate) fn small_angle_could_help_half_angle(
+    prec: Prec,
+    delta: &FBig<HalfEven>,
+    z_y: &FBig<HalfEven>,
+) -> bool {
+    let two = prec.fb(FBig::try_from(2.0).unwrap());
+    *delta > &two * (z_y * z_y)
 }
 
 /// Cheap, O(1), search-free pre-check: is it even *plausible* that pinning the identity as
@@ -1425,6 +1567,168 @@ mod tests {
         assert!(
             achieved <= to_fbig(prec, delta) * to_fbig(prec, 1.5),
             "achieved error {achieved} for negative theta={theta} exceeds the budget"
+        );
+    }
+
+    // ---- Half-angle entry points (mixed fallback's correction step) ----
+
+    // `canonicalize_half_angle` must agree with `synth_small_angle_with_max_k`'s own raw-f64
+    // canonicalization: for a raw theta reduced into (pi, 2*pi) (needing the X-conjugate
+    // reflection) vs one already in [0, pi] (not needing it), both routes must land on the
+    // same canonical (z_x, z_y, need_x_conjugate).
+    #[test]
+    fn canonicalize_half_angle_matches_f64_canonicalization() {
+        for theta in [0.3_f64, 1.0, 2.5, -0.7, -2.0, 4.0, -4.0] {
+            let two_pi = 2.0 * PI;
+            let theta_wrapped = theta.rem_euclid(two_pi);
+            let (theta_pos_expected, need_x_conjugate_expected) = if theta_wrapped <= PI {
+                (theta_wrapped, false)
+            } else {
+                (two_pi - theta_wrapped, true)
+            };
+
+            let neg_theta_half = to_fbig(PREC, -theta / 2.0);
+            let z_x_raw = PREC.fb(neg_theta_half.clone().cos());
+            let z_y_raw = PREC.fb(neg_theta_half.sin());
+            let (z_x, z_y, _need_negate, need_x_conjugate) =
+                canonicalize_half_angle(PREC, z_x_raw, z_y_raw);
+
+            assert_eq!(
+                need_x_conjugate, need_x_conjugate_expected,
+                "theta={theta}: X-conjugate flag mismatch"
+            );
+            assert!(
+                z_x >= PREC.ib(IBig::ZERO),
+                "theta={theta}: z_x should be >= 0"
+            );
+            assert!(
+                z_y <= PREC.ib(IBig::ZERO),
+                "theta={theta}: z_y should be <= 0"
+            );
+
+            let expected_neg_theta_pos_half = to_fbig(PREC, -theta_pos_expected / 2.0);
+            let expected_z_x = PREC.fb(expected_neg_theta_pos_half.clone().cos());
+            let expected_z_y = PREC.fb(expected_neg_theta_pos_half.sin());
+            assert!(
+                approx_eq(&z_x, &expected_z_x, 40),
+                "theta={theta}: z_x={z_x}, expected {expected_z_x}"
+            );
+            assert!(
+                approx_eq(&z_y, &expected_z_y, 40),
+                "theta={theta}: z_y={z_y}, expected {expected_z_y}"
+            );
+        }
+    }
+
+    fn approx_eq(a: &FBig<HalfEven>, b: &FBig<HalfEven>, tol_bits: usize) -> bool {
+        let diff = (a - b).abs();
+        let tol = PREC.ib(IBig::ONE) / PREC.ib(IBig::ONE << tol_bits);
+        diff <= tol
+    }
+
+    // Regression for a real bug: a raw half-angle pair whose `theta/2` lands outside
+    // `(-pi/2, pi/2)` (i.e. `z_x < 0`, `canonicalize_half_angle`'s `need_negate` branch) used
+    // to be handled by an earlier, buggy version of this module that applied only
+    // `apply_x_conjugation` and never `apply_negation` -- producing a `Mixed` result whose
+    // `lo`/`hi` labeling was inverted when re-evaluated against the caller's own (raw,
+    // uncanonicalized) frame, tripping `mixture_weight`'s `Im(w_lo) <= 0 <= Im(w_hi)`
+    // `debug_assert`. `theta_raw = 2*pi - 1e-3` represents the same channel as `theta = -1e-3`
+    // but as a half-angle pair has `z_x < 0` (confirmed via the premise assertion below) --
+    // exactly the case the old code mishandled.
+    #[test]
+    fn synth_small_angle_correction_handles_raw_pair_needing_negation() {
+        use crate::config::config_from_theta_epsilon;
+
+        let theta_raw = 2.0 * PI - 1e-3;
+        let delta = 1e-4_f64;
+
+        let mut config = config_from_theta_epsilon(theta_raw, delta, 7, false, false);
+        let prec = config.prec;
+        let two = prec.fb(FBig::try_from(2.0).unwrap());
+        let theta_raw_fbig = to_fbig(prec, theta_raw);
+        let neg_theta_half = -prec.fb(&theta_raw_fbig / &two);
+        let z_x = prec.fb(neg_theta_half.clone().cos());
+        let z_y = prec.fb(neg_theta_half.sin());
+
+        let (_, _, need_negate, _) = canonicalize_half_angle(prec, z_x.clone(), z_y.clone());
+        assert!(
+            need_negate,
+            "test premise: this raw pair should exercise the negation-correction branch"
+        );
+
+        let delta_fbig = to_fbig(prec, delta);
+        let result = synth_small_angle_correction(
+            &mut config,
+            &z_x,
+            &z_y,
+            &delta_fbig,
+            DEFAULT_MAX_LIVE_SEARCH_K,
+        )
+        .expect("expected a result for this well-formed (small-channel) residual");
+
+        // Re-evaluate against the RAW frame directly (mirrors how
+        // `mixed_fallback::residual_wframe` independently re-derives the same frame from the
+        // caller's own raw half-angle pair) -- this must not panic on `mixture_weight`'s
+        // precondition, and must meet the requested budget.
+        let wframe = WFrame::from_target_direction(prec, z_x, z_y);
+        let achieved = result.achieved_diamond_error_with_frame(&wframe);
+        assert!(
+            achieved <= delta_fbig.clone() * to_fbig(prec, 1.5),
+            "achieved error {achieved} exceeds budget {delta_fbig}"
+        );
+    }
+
+    // `small_angle_could_help_half_angle` must agree with `small_angle_could_help`'s own
+    // (theta, delta) condition, for a raw (uncanonicalized) half-angle pair.
+    #[test]
+    fn small_angle_could_help_half_angle_matches_f64_version() {
+        for theta in [0.05_f64, 1.0, -0.5, 2.0] {
+            for delta in [1e-6_f64, 1e-3, 0.5] {
+                let expected = small_angle_could_help(theta, delta);
+                let neg_theta_half = to_fbig(PREC, -theta / 2.0);
+                let z_y = PREC.fb(neg_theta_half.sin());
+                let delta_fbig = to_fbig(PREC, delta);
+                let actual = small_angle_could_help_half_angle(PREC, &delta_fbig, &z_y);
+                assert_eq!(
+                    actual, expected,
+                    "theta={theta}, delta={delta}: half-angle pre-check disagrees with f64 one"
+                );
+            }
+        }
+    }
+
+    // The correction entry point must actually find a cheap (identity-pinned) mixed result
+    // for a small residual angle, reusing a caller-provided config, and the result must meet
+    // its own delta.
+    #[test]
+    fn synth_small_angle_correction_finds_cheap_result_for_small_residual() {
+        use crate::config::config_from_theta_epsilon;
+
+        let theta = 1e-3_f64;
+        let delta = 1e-4_f64;
+        assert!(small_angle_could_help(theta, delta));
+
+        let mut config = config_from_theta_epsilon(theta, delta, 7, false, false);
+        let prec = config.prec;
+        let neg_theta_half = -prec.fb(&config.theta / &prec.fb(FBig::try_from(2.0).unwrap()));
+        let z_x = prec.fb(neg_theta_half.clone().cos());
+        let z_y = prec.fb(neg_theta_half.sin());
+        let delta_fbig = prec.fb(FBig::try_from(delta).unwrap());
+
+        let result = synth_small_angle_correction(
+            &mut config,
+            &z_x,
+            &z_y,
+            &delta_fbig,
+            DEFAULT_MAX_LIVE_SEARCH_K,
+        )
+        .expect("expected a result for a well-formed small residual");
+
+        let theta_fbig = to_fbig(prec, theta);
+        let achieved = result.achieved_diamond_error(&theta_fbig);
+        assert!(
+            achieved <= delta_fbig.clone() * to_fbig(prec, 1.5),
+            "achieved error {achieved} exceeds budget {delta_fbig}"
         );
     }
 
