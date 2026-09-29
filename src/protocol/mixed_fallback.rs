@@ -45,12 +45,13 @@ use crate::protocol::fallback::{
     half_angle_cos_sin, phase_cos_sin, residual_diamond_error_mixed, SectorRegion,
 };
 use crate::protocol::mixed_diagonal::{
-    assemble_result, search_for_straddling_pair, MixedDiagonalRegion, MixedDiagonalResult,
-    StraddleOutcome,
+    assemble_result, search_for_straddling_pair, synth_mixed_diagonal, MixedDiagonalRegion,
+    MixedDiagonalResult, StraddleOutcome,
 };
 use crate::protocol::mixing::mixture_weight;
 use crate::protocol::small_angle::{
-    small_angle_could_help_half_angle, synth_small_angle_correction, DEFAULT_MAX_LIVE_SEARCH_K,
+    small_angle_could_help, small_angle_could_help_half_angle, synth_small_angle_correction,
+    DEFAULT_MAX_LIVE_SEARCH_K,
 };
 use crate::ring::{DRootTwo, ZRootTwo};
 use crate::synthesis_of_clifford_t::decompose_domega_unitary;
@@ -87,6 +88,28 @@ impl MixedFallbackSide {
         let z = u.z();
         (z.real(prec) * z.real(prec)) + (z.imag(prec) * z.imag(prec))
     }
+
+    /// Weight-averaged T-count for this side alone: the projective step's gates run
+    /// unconditionally, and the correction is needed only on the failure branch (probability
+    /// `1 - achieved_success_probability()`) -- mirrors
+    /// [`crate::protocol::mixed_diagonal::MixedDiagonalResult::expected_t_count`]'s doc, one
+    /// level up.
+    pub fn expected_t_count(&self) -> FBig<HalfEven> {
+        let prec = self.prec;
+        let projective_t = prec.ib(IBig::from(self.projective_gates.t_count()));
+        let one = prec.ib(IBig::ONE);
+        let fail_prob = &one - &self.achieved_success_probability();
+        &projective_t + (&fail_prob * &self.correction.expected_t_count())
+    }
+
+    /// Worst-case T-count for this side alone: the projective step's gates run unconditionally
+    /// *plus* the correction's own worst case on the (unlucky) failure branch -- a sum, not a
+    /// max, since both are paid in the same run when the projective step fails. Contrast with
+    /// [`crate::protocol::mixed_diagonal::MixedDiagonalResult::max_t_count`], where the outer
+    /// choice is a mutually-exclusive coin (a max), not a sequential fallback (a sum).
+    pub fn max_t_count(&self) -> usize {
+        self.projective_gates.t_count() + self.correction.max_t_count()
+    }
 }
 
 /// Diamond-norm distance between `correction` (a mixed-diagonal, twirled-branch result) and
@@ -107,7 +130,7 @@ fn weighted_correction_distance(
 impl AchievedDiamondError for MixedFallbackSide {
     /// Triangle-inequality upper bound on *this side alone's* diamond-norm distance to
     /// `theta`, as if it were always selected (i.e. ignoring the outer `p`/`1-p` choice
-    /// between `lo`/`hi` -- see [`MixedFallbackResult`]'s own impl for why that choice needs
+    /// between `lo`/`hi` -- see [`ProtocolResult`]'s own impl for why that choice needs
     /// different treatment): `p_success * dist_phase(projective, theta) + (1 - p_success) *
     /// weighted_correction_distance(..)`, mirroring
     /// [`crate::protocol::fallback::FallbackResult`]'s impl but with the "failure" branch
@@ -129,16 +152,24 @@ impl AchievedDiamondError for MixedFallbackSide {
     }
 }
 
-/// The output of [`synth_mixed_fallback`]. Call
-/// [`AchievedDiamondError::achieved_diamond_error`] to compute the achieved projective-step
-/// diamond-norm error on demand.
+/// The output of [`synth_rotation`], and (via its `Mixed`/`Exact` variants) of
+/// [`synth_mixed_fallback`]. Call [`AchievedDiamondError::achieved_diamond_error`] to compute
+/// the achieved projective-step diamond-norm error on demand, and
+/// [`ProtocolResult::expected_t_count`]/[`ProtocolResult::max_t_count`] to compare protocols by
+/// cost.
 #[derive(Debug, Clone)]
-pub enum MixedFallbackResult {
+pub enum ProtocolResult {
     /// The target direction was ring-exactly representable (e.g. `theta` a multiple of
     /// `pi/2`): a single gate word suffices, with zero error and no fallback structure at
     /// all -- mirrors [`crate::protocol::mixed_diagonal::MixedDiagonalResult`]'s analogous
     /// degenerate case.
     Exact { gates: GateSeq, prec: Prec },
+    /// Mixing only, no fallback: [`synth_rotation`] picked
+    /// [`crate::protocol::mixed_diagonal::synth_mixed_diagonal`]'s result over mixed fallback's
+    /// because it had the lower expected T-count (the small-angle regime, where pinning the
+    /// identity as one mixture branch can beat even mixed fallback's ancilla-assisted cost).
+    /// No ancilla, no measurement -- just the one biased coin mixed diagonal already needs.
+    MixedDiagonal(MixedDiagonalResult),
     /// The general case: two straddling projective branches, mixed with probability `p`
     /// (`lo` at weight `p`, `hi` at weight `1-p`), each with its own achieved success
     /// probability and mixed-diagonal correction.
@@ -167,7 +198,7 @@ pub enum MixedFallbackResult {
     },
 }
 
-impl AchievedDiamondError for MixedFallbackResult {
+impl AchievedDiamondError for ProtocolResult {
     /// Recomputes the achieved diamond-norm error to `theta` directly from the public gate
     /// strings.
     ///
@@ -222,10 +253,11 @@ impl AchievedDiamondError for MixedFallbackResult {
     /// rather than assuming zero.
     fn achieved_diamond_error(&self, theta: &FBig<HalfEven>) -> FBig<HalfEven> {
         match self {
-            MixedFallbackResult::Exact { gates, prec } => {
+            ProtocolResult::Exact { gates, prec } => {
                 achieved_diagonal_diamond_error(*prec, theta, gates)
             }
-            MixedFallbackResult::Mixed { lo, hi, p } => {
+            ProtocolResult::MixedDiagonal(r) => r.achieved_diamond_error(theta),
+            ProtocolResult::Mixed { lo, hi, p } => {
                 let prec = lo.prec;
                 let wframe = WFrame::new(prec, theta);
                 let lo_u = DOmegaUnitary::from_gates(&lo.projective_gates);
@@ -260,6 +292,54 @@ impl AchievedDiamondError for MixedFallbackResult {
 
                 (&projective_term + &lo_term) + &hi_term
             }
+        }
+    }
+}
+
+impl ProtocolResult {
+    /// Whether sampling this result requires an ancilla qubit at all -- `true` only for
+    /// `Mixed`, mixed fallback's ancilla-assisted projective step. `Exact` and `MixedDiagonal`
+    /// need none.
+    pub fn needs_ancilla(&self) -> bool {
+        matches!(self, ProtocolResult::Mixed { .. })
+    }
+
+    /// Whether sampling this result requires a mid-circuit measurement -- mirrors
+    /// [`ProtocolResult::needs_ancilla`]: `true` only for `Mixed`, which measures the
+    /// projective step's success/failure outcome.
+    pub fn needs_measurement(&self) -> bool {
+        matches!(self, ProtocolResult::Mixed { .. })
+    }
+
+    /// Weight-averaged T-count -- the protocol's mean cost, in the same convention as
+    /// [`crate::protocol::mixed_diagonal::MixedDiagonalResult::expected_t_count`]. `Exact` is
+    /// that one word's T-count; `MixedDiagonal` delegates; `Mixed` is `p*lo.expected_t_count()
+    /// + (1-p)*hi.expected_t_count()`, each side's own cost already folding in its correction's
+    /// failure-weighted cost (see [`MixedFallbackSide::expected_t_count`]).
+    pub fn expected_t_count(&self) -> FBig<HalfEven> {
+        match self {
+            ProtocolResult::Exact { gates, prec } => prec.ib(IBig::from(gates.t_count())),
+            ProtocolResult::MixedDiagonal(r) => r.expected_t_count(),
+            ProtocolResult::Mixed { lo, hi, p } => {
+                let prec = lo.prec;
+                let one = prec.ib(IBig::ONE);
+                let one_minus_p = &one - p;
+                (p * &lo.expected_t_count()) + (&one_minus_p * &hi.expected_t_count())
+            }
+        }
+    }
+
+    /// Worst-case T-count -- the T-count of whichever branch actually gets sampled, in the
+    /// unluckiest case. `Exact` is that one word's T-count; `MixedDiagonal` delegates; `Mixed`
+    /// is `max(lo.max_t_count(), hi.max_t_count())`, since the outer coin (step 1 of
+    /// [`ProtocolResult::Mixed`]'s own runtime-sequence doc) selects exactly one side --
+    /// contrast with each side's own [`MixedFallbackSide::max_t_count`], which is a *sum*
+    /// (projective plus correction), not a max.
+    pub fn max_t_count(&self) -> usize {
+        match self {
+            ProtocolResult::Exact { gates, .. } => gates.t_count(),
+            ProtocolResult::MixedDiagonal(r) => r.max_t_count(),
+            ProtocolResult::Mixed { lo, hi, .. } => lo.max_t_count().max(hi.max_t_count()),
         }
     }
 }
@@ -392,7 +472,7 @@ pub fn synth_mixed_fallback(
     q: DRootTwo,
     seed: u64,
     verbose: bool,
-) -> Option<MixedFallbackResult> {
+) -> Option<ProtocolResult> {
     let mut config = config_from_theta_epsilon(theta, epsilon_diamond, seed, verbose, false);
     let prec = config.prec;
     // Cloned once, up front: `build_side` below also takes `&mut config`, and a borrow of
@@ -436,7 +516,7 @@ pub fn synth_mixed_fallback(
 
     match outcome {
         StraddleOutcome::NotFound => None,
-        StraddleOutcome::Unmixed(u) => Some(MixedFallbackResult::Exact {
+        StraddleOutcome::Unmixed(u) => Some(ProtocolResult::Exact {
             gates: decompose_domega_unitary(u),
             prec,
         }),
@@ -472,12 +552,75 @@ pub fn synth_mixed_fallback(
                 &mut config,
             );
 
-            Some(MixedFallbackResult::Mixed {
+            Some(ProtocolResult::Mixed {
                 lo: lo_side,
                 hi: Box::new(hi_side),
                 p: mw.p,
             })
         }
+    }
+}
+
+/// Synthesizes a probabilistic-channel approximation of `R_z(theta)` to diamond-norm accuracy
+/// `epsilon_diamond`, choosing whichever of [`crate::protocol::mixed_diagonal::synth_mixed_diagonal`]
+/// (no ancilla, no measurement) or [`synth_mixed_fallback`] (one ancilla, one measurement, but
+/// usually far fewer T gates) has the lower [`ProtocolResult::expected_t_count`].
+///
+/// Small-angle synthesis (`crate::protocol::small_angle`) means that ordering is no longer
+/// fixed: mixed fallback's mean cost fit (`0.53*log2(1/eps) + 4.86`) beats mixed diagonal's
+/// (`1.52*log2(1/eps) - 0.01`) for any eps below ~3.3% *in the generic case*, but when `theta`
+/// is small relative to `epsilon_diamond`, mixed diagonal can pin the identity as one mixture
+/// branch and collapse its own expected T-count far below that fit -- sometimes to zero --
+/// cheaper than paying for an ancilla and a measurement at all.
+///
+/// Dispatches on [`small_angle_could_help`] (the same O(1) closed-form pre-check
+/// `synth_mixed_diagonal` itself uses) to decide whether that regime is even in play, so this
+/// runs only **one** full protocol search in the generic case (mixed fallback, which wins there
+/// by a wide margin) and both only in the small-angle regime, where the second search
+/// (`synth_mixed_diagonal`) is typically cheap -- it usually resolves via the identity-alone
+/// fast path or Bothe's static table (see `small_angle::synth_small_angle`'s own docs) without
+/// running a lattice search at all. A mixed-diagonal expected T-count of exactly zero is
+/// returned immediately without running mixed fallback at all, since nothing can beat it.
+///
+/// On an exact tie in expected T-count, prefers the mixed-diagonal result: same cost, fewer
+/// resources.
+///
+/// # Panics
+/// Panics if `synth_mixed_diagonal`'s internal search exceeds its bound; see that function's
+/// own docs. Not expected to trigger for any well-formed input.
+pub fn synth_rotation(
+    theta: f64,
+    epsilon_diamond: f64,
+    q: DRootTwo,
+    seed: u64,
+    verbose: bool,
+) -> ProtocolResult {
+    if !small_angle_could_help(theta, epsilon_diamond) {
+        if let Some(result) = synth_mixed_fallback(theta, epsilon_diamond, q, seed, verbose) {
+            return result;
+        }
+        // Mixed fallback's sector search found nothing (an "expected" outcome for that region
+        // shape, not a bug -- see `synth_mixed_fallback`'s own docs) -- fall through to the
+        // always-available mixed-diagonal result below.
+        return ProtocolResult::MixedDiagonal(synth_mixed_diagonal(
+            theta,
+            epsilon_diamond,
+            seed,
+            verbose,
+        ));
+    }
+
+    let mixed_diagonal = synth_mixed_diagonal(theta, epsilon_diamond, seed, verbose);
+    let mixed_diagonal_cost = mixed_diagonal.expected_t_count();
+    let zero = mixed_diagonal.prec().ib(IBig::ZERO);
+    if mixed_diagonal_cost == zero {
+        // Unbeatable: nothing costs less than zero T gates.
+        return ProtocolResult::MixedDiagonal(mixed_diagonal);
+    }
+
+    match synth_mixed_fallback(theta, epsilon_diamond, q, seed, verbose) {
+        Some(fallback) if fallback.expected_t_count() < mixed_diagonal_cost => fallback,
+        _ => ProtocolResult::MixedDiagonal(mixed_diagonal),
     }
 }
 
@@ -494,13 +637,6 @@ mod tests {
             dashu_base::Approximation::Exact(v) => v,
             dashu_base::Approximation::Inexact(v, _) => v,
         }
-    }
-
-    fn total_expected_t_count(side: &MixedFallbackSide) -> f64 {
-        let p_t = side.projective_gates.t_count() as f64;
-        let fail_prob = 1.0 - fbig_to_f64(&side.achieved_success_probability());
-        let correction_cost = fbig_to_f64(&side.correction.expected_t_count());
-        p_t + fail_prob * correction_cost
     }
 
     // NOTE: unlike `mixed_diagonal::search_for_straddling_pair` used directly with the much
@@ -522,15 +658,20 @@ mod tests {
         let result = synth_mixed_fallback(PI / 2.0, 1e-6, q, 11, false)
             .expect("search should succeed for theta=pi/2");
         match result {
-            MixedFallbackResult::Exact { gates, .. } => {
+            ProtocolResult::Exact { gates, .. } => {
                 assert!(!gates.is_empty());
             }
-            MixedFallbackResult::Mixed { p, .. } => {
+            ProtocolResult::Mixed { p, .. } => {
                 let p_f64 = fbig_to_f64(&p);
                 assert!(
                     (0.0..=1.0).contains(&p_f64),
                     "p={p_f64} out of [0,1] range even for a degenerate angle"
                 );
+            }
+            ProtocolResult::MixedDiagonal(_) => {
+                unreachable!(
+                    "synth_mixed_fallback never produces MixedDiagonal -- only synth_rotation does"
+                )
             }
         }
     }
@@ -541,7 +682,7 @@ mod tests {
         let result = synth_mixed_fallback(3.0 * PI / 32.0, 1e-6, q.clone(), 13, false)
             .expect("search should succeed for a generic angle");
         match result {
-            MixedFallbackResult::Mixed { lo, hi, p } => {
+            ProtocolResult::Mixed { lo, hi, p } => {
                 let p_f64 = fbig_to_f64(&p);
                 assert!((0.0..=1.0).contains(&p_f64), "p={p_f64} out of [0,1] range");
                 assert!(
@@ -667,11 +808,16 @@ mod tests {
                     continue;
                 };
                 let cost = match result {
-                    MixedFallbackResult::Exact { .. } => 0.0,
-                    MixedFallbackResult::Mixed { lo, hi, p, .. } => {
+                    // Skip sentinel, not a real cost -- an `Exact` result has zero mixture
+                    // structure at all, so it shouldn't be fit against the mixture cost slope.
+                    ProtocolResult::Exact { .. } => 0.0,
+                    ProtocolResult::MixedDiagonal(_) => {
+                        unreachable!("synth_mixed_fallback never produces MixedDiagonal -- only synth_rotation does")
+                    }
+                    ProtocolResult::Mixed { lo, hi, p, .. } => {
                         let p_f64 = fbig_to_f64(&p);
-                        p_f64 * total_expected_t_count(&lo)
-                            + (1.0 - p_f64) * total_expected_t_count(&hi)
+                        p_f64 * fbig_to_f64(&lo.expected_t_count())
+                            + (1.0 - p_f64) * fbig_to_f64(&hi.expected_t_count())
                     }
                 };
                 xs.push((1.0 / eps).log2());
@@ -706,5 +852,116 @@ mod tests {
             slope > 0.0 && slope < 1.5,
             "measured slope {slope} is not even qualitatively better than plain fallback's ~1.03"
         );
+    }
+
+    // Small-angle regime, same (theta, delta) pair `small_angle::tests::
+    // small_angle_beats_mixed_diagonal_for_small_theta` already confirmed makes mixed diagonal
+    // beat even-split. Confirms the crossover this whole selector exists for is real: mixed
+    // diagonal alone must also beat mixed fallback's ancilla-assisted cost here, and
+    // `synth_rotation` must actually detect and return it -- without this test, a selector
+    // that always picked mixed fallback would still pass every other test in this file.
+    #[test]
+    fn synth_rotation_prefers_mixed_diagonal_in_small_angle_regime() {
+        let theta = 1e-3;
+        let delta = 1e-4;
+        let q = exact_q(7);
+
+        let mixed_diagonal_cost =
+            fbig_to_f64(&synth_mixed_diagonal(theta, delta, 7, false).expected_t_count());
+        let mixed_fallback_cost = synth_mixed_fallback(theta, delta, q.clone(), 7, false)
+            .map(|r| fbig_to_f64(&r.expected_t_count()));
+
+        eprintln!(
+            "small-angle regime: mixed-diagonal mean T-count={mixed_diagonal_cost}, \
+             mixed-fallback mean T-count={mixed_fallback_cost:?}"
+        );
+        assert!(
+            mixed_fallback_cost.is_none_or(|c| mixed_diagonal_cost < c),
+            "test premise: mixed diagonal ({mixed_diagonal_cost}) should already beat mixed \
+             fallback ({mixed_fallback_cost:?}) at theta={theta}, delta={delta}"
+        );
+
+        let result = synth_rotation(theta, delta, q, 7, false);
+        assert!(
+            matches!(result, ProtocolResult::MixedDiagonal(_)),
+            "expected MixedDiagonal in the small-angle regime, got {result:?}"
+        );
+        assert!(!result.needs_ancilla());
+        assert!(!result.needs_measurement());
+    }
+
+    // Generic regime (`small_angle_could_help` false): mixed fallback's baseline fit
+    // (`0.53*L+4.86`) beats mixed diagonal's (`1.52*L-0.01`) by a wide margin, so
+    // `synth_rotation` must not spend a second search here -- it should behave exactly like
+    // `synth_mixed_fallback` and return one of its variants, never falling through to
+    // `MixedDiagonal` (which would indicate the predictor is misfiring on the common case).
+    #[test]
+    fn synth_rotation_uses_mixed_fallback_in_generic_regime() {
+        let theta = 1.0;
+        let epsilon = 1e-10;
+        let q = exact_q(7);
+
+        assert!(
+            !crate::protocol::small_angle::small_angle_could_help(theta, epsilon),
+            "test premise: theta={theta} should be outside the small-angle-eligible regime"
+        );
+
+        let result = synth_rotation(theta, epsilon, q, 7, false);
+        assert!(
+            !matches!(result, ProtocolResult::MixedDiagonal(_)),
+            "expected a mixed-fallback variant (Exact or Mixed) in the generic regime, got \
+             {result:?}"
+        );
+    }
+
+    // The property the whole selector exists to guarantee: across both regimes,
+    // `synth_rotation` never returns a result costing more than the better of the two
+    // protocols run individually.
+    //
+    // Deliberately excludes exact-representable angles (e.g. theta = pi/2): mixed diagonal's
+    // search finds those as a zero-cost `Exact` fast path, but mixed fallback's much wider
+    // `SectorRegion` search can race past that same exact candidate and settle for a costlier
+    // `Mixed` result instead (a pre-existing, documented limitation --
+    // `degenerate_angle_produces_a_valid_result`'s own comment above). `synth_rotation`'s
+    // generic-regime path runs only mixed fallback's search (by design -- see its own docs on
+    // why running both there would cost more than the mispick risk it avoids), so it inherits
+    // that pre-existing gap rather than closing it; asserting across it here would test a
+    // guarantee the design never made.
+    #[test]
+    fn synth_rotation_never_worse_than_either_protocol() {
+        let q = exact_q(7);
+        let cases: [(f64, f64); 5] = [
+            (1e-3, 1e-4), // small-angle regime, mixed diagonal should win
+            (1e-2, 1e-3), // small-angle regime, closer to the boundary
+            (1.0, 1e-6),  // generic regime
+            (3.0 * PI / 32.0, 1e-8),
+            (4.2, 1e-10),
+        ];
+
+        for (i, &(theta, epsilon)) in cases.iter().enumerate() {
+            let seed = 500 + i as u64;
+            let mixed_diagonal_cost =
+                fbig_to_f64(&synth_mixed_diagonal(theta, epsilon, seed, false).expected_t_count());
+            let mixed_fallback_cost = synth_mixed_fallback(theta, epsilon, q.clone(), seed, false)
+                .map(|r| fbig_to_f64(&r.expected_t_count()));
+            let best_individual = match mixed_fallback_cost {
+                Some(c) => mixed_diagonal_cost.min(c),
+                None => mixed_diagonal_cost,
+            };
+
+            let chosen_cost = fbig_to_f64(
+                &synth_rotation(theta, epsilon, q.clone(), seed, false).expected_t_count(),
+            );
+
+            eprintln!(
+                "theta={theta}, epsilon={epsilon:e}: synth_rotation cost={chosen_cost}, \
+                 best individual={best_individual}"
+            );
+            assert!(
+                chosen_cost <= best_individual + 1e-9,
+                "theta={theta}, epsilon={epsilon:e}: synth_rotation returned cost \
+                 {chosen_cost}, worse than the best individual protocol {best_individual}"
+            );
+        }
     }
 }

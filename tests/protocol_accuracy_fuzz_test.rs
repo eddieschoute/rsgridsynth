@@ -5,7 +5,7 @@
 //! Each protocol's result type computes its accuracy metric on demand, straight from its own
 //! public gate string(s) (decoding them back into unitaries) -- via the shared
 //! `AchievedDiamondError::achieved_diamond_error` trait (`MixedDiagonalResult`,
-//! `MixedFallbackResult`, `FallbackResult`, `MixedFallbackSide`), and via
+//! `ProtocolResult`, `FallbackResult`, `MixedFallbackSide`), and via
 //! `achieved_success_probability` (`FallbackResult`, `MixedFallbackSide`) -- rather than caching
 //! it eagerly during synthesis. These tests call those on demand across many random target
 //! angles and a spread of diamond-norm epsilons -- from coarse (1e-2) down to 1e-15 -- checking
@@ -21,8 +21,8 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rsgridsynth::config::config_from_theta_epsilon;
 use rsgridsynth::protocol::{
-    exact_q, synth_fallback, synth_mixed_diagonal, synth_mixed_fallback, AchievedDiamondError,
-    MixedDiagonalResult, MixedFallbackResult,
+    exact_q, synth_fallback, synth_mixed_diagonal, synth_mixed_fallback, synth_rotation,
+    AchievedDiamondError, MixedDiagonalResult, ProtocolResult,
 };
 use serial_test::serial;
 
@@ -166,13 +166,18 @@ fn fuzz_mixed_fallback_accuracy() {
             let theta_fbig = theta_at_matching_precision(theta, epsilon);
 
             match &result {
-                MixedFallbackResult::Exact { gates, .. } => {
+                ProtocolResult::Exact { gates, .. } => {
                     assert!(
                         !gates.is_empty(),
                         "theta={theta}, epsilon={epsilon:e}: exact result has empty gates"
                     );
                 }
-                MixedFallbackResult::Mixed { lo, hi, p } => {
+                ProtocolResult::MixedDiagonal(_) => {
+                    unreachable!(
+                        "synth_mixed_fallback never produces MixedDiagonal -- only synth_rotation does"
+                    )
+                }
+                ProtocolResult::Mixed { lo, hi, p } => {
                     let p_f64 = fbig_to_f64(p);
                     assert!(
                         (0.0..=1.0).contains(&p_f64),
@@ -221,6 +226,72 @@ fn fuzz_mixed_fallback_accuracy() {
                         );
                     }
                 }
+            }
+        }
+    }
+}
+
+/// Fuzzes `synth_rotation`, the selector that picks between `synth_mixed_diagonal` and
+/// `synth_mixed_fallback` by expected T-count. It never returns `None`, and its accuracy is
+/// entirely delegated to whichever protocol it picked -- `ProtocolResult::MixedDiagonal`'s
+/// error computation is exactly `MixedDiagonalResult`'s (already fuzzed above by
+/// `fuzz_mixed_diagonal_accuracy`), and `Exact`/`Mixed` are exactly `synth_mixed_fallback`'s
+/// (already fuzzed above by `fuzz_mixed_fallback_accuracy`). So this test's job is narrower:
+/// confirm the selector doesn't introduce a NEW accuracy problem at the boundary between the
+/// two regimes, covering both random generic-regime angles and small angles relative to
+/// epsilon (the regime this selector exists for). Same known-limitation carve-outs as the two
+/// tests above apply here (exact-ring-unitary fast path, degenerate straddling search) since
+/// this delegates to exactly the same code paths.
+#[test]
+#[serial]
+fn fuzz_synth_rotation_accuracy() {
+    let q = exact_q(7);
+    // Fixed, hand-picked angles rather than `random_angles`: fuzzing this test during
+    // development surfaced two genuine, pre-existing accuracy bugs in code this function
+    // delegates to unchanged (neither introduced by `synth_rotation` itself, both reproducible
+    // via a direct call with no selector involved) --
+    //   1. `ProtocolResult::Mixed::achieved_diamond_error` panics on `mixture_weight`'s
+    //      "Im(w_lo) must be <= 0" precondition for some generic angles, e.g.
+    //      theta=3.988052874552613, epsilon=1e-4, seed=7 (found via `synth_mixed_fallback`
+    //      directly).
+    //   2. `MixedDiagonalResult::Mixed::achieved_diamond_error` panics the same way for angles
+    //      near a `2*pi` wraparound at a coarse epsilon that puts them in the small-angle
+    //      regime, e.g. theta=6.247735349959941, epsilon=1e-2, seed=7 (found via
+    //      `synth_mixed_diagonal` directly).
+    // Both are out of scope for this selector to fix -- fixing `mixture_weight`'s handling of
+    // whatever geometry produces an `Im(w_lo) > 0` pair is a separate task. This fixed set is
+    // confirmed clear of both triggers, so this test isn't silently exercising either one
+    // without knowing it.
+    let generic_thetas = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0];
+    let small_thetas = [1e-3, 1e-4, 5e-4];
+
+    for &epsilon in &EPSILONS {
+        for &theta in generic_thetas.iter().chain(small_thetas.iter()) {
+            let result = synth_rotation(theta, epsilon, q.clone(), 7, false);
+            let theta_fbig = theta_at_matching_precision(theta, epsilon);
+            let achieved_f64 = fbig_to_f64(&result.achieved_diamond_error(&theta_fbig));
+
+            let hit_known_fast_path_caveat = match &result {
+                ProtocolResult::Exact { .. } => true,
+                ProtocolResult::MixedDiagonal(r) => matches!(r, MixedDiagonalResult::Exact { .. }),
+                ProtocolResult::Mixed { lo, hi, .. } => {
+                    matches!(lo.correction, MixedDiagonalResult::Exact { .. })
+                        || matches!(hi.correction, MixedDiagonalResult::Exact { .. })
+                }
+            };
+
+            if hit_known_fast_path_caveat {
+                assert!(
+                    (0.0..=2.0).contains(&achieved_f64),
+                    "theta={theta}, epsilon={epsilon:e}: achieved diamond error {achieved_f64:e} \
+                     is not a valid diamond-norm distance"
+                );
+            } else {
+                assert!(
+                    achieved_f64 <= epsilon * (1.0 + measurement_slack(epsilon)),
+                    "theta={theta}, epsilon={epsilon:e}: achieved diamond error {achieved_f64:e} \
+                     exceeds requested budget"
+                );
             }
         }
     }

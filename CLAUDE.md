@@ -230,3 +230,27 @@ flip, a measurement, or both. All are diamond-norm accurate to the same one conv
   even split when it applies. `delta` here is the *whole mixture's* budget, compared directly
   against `mixture_weight`'s `projective_diamond_error` — same convention as everywhere else,
   no conversion.
+
+Small-angle synthesis broke what used to be a fixed cost ordering between Stage 1 and Stage 3:
+mixed fallback's baseline fit beats mixed diagonal's for any non-trivial epsilon, but when
+`theta` is small enough for the identity-pinning trick above, mixed diagonal's *expected*
+T-count can collapse below mixed fallback's — cheaper without paying for mixed fallback's
+ancilla and measurement at all. **`mixed_fallback.rs`'s `synth_rotation`** is the entry point
+that picks between them by `ProtocolResult::expected_t_count`, returning `ProtocolResult`
+(renamed from `MixedFallbackResult`, with a new `MixedDiagonal(MixedDiagonalResult)` variant for
+when mixed diagonal wins outright — `needs_ancilla`/`needs_measurement` on `ProtocolResult` tell
+a caller which resources the returned variant actually needs). It dispatches on
+`small_angle_could_help` to run only mixed fallback's search in the generic case (it wins there
+by a wide, fit-derived margin) and both searches only in the small-angle regime, where the
+second search is typically cheap. This is the recommended entry point for "give me the cheapest
+mixed protocol"; `synth_mixed_diagonal`/`synth_mixed_fallback` remain available directly for
+callers that need one specific protocol (e.g. to reproduce a benchmark, or because only one is
+resource-compatible).
+
+Note (found while fuzzing `synth_rotation`, not introduced by it): `ProtocolResult::Mixed`'s and
+`MixedDiagonalResult::Mixed`'s `achieved_diamond_error` can each panic on `mixture_weight`'s
+"Im(w_lo) must be <= 0" precondition for specific inputs — confirmed reproducible via a direct
+`synth_mixed_fallback`/`synth_mixed_diagonal` call with no selector involved
+(theta=3.988052874552613, epsilon=1e-4, seed=7; and theta=6.247735349959941, epsilon=1e-2,
+seed=7, respectively — the latter near a `2*pi` wraparound at a coarse epsilon that puts it in
+the small-angle regime). Not yet root-caused or fixed.

@@ -76,7 +76,7 @@ use rsgridsynth::common::Prec;
 use rsgridsynth::protocol::fallback::exact_q;
 use rsgridsynth::protocol::{
     synth_fallback, synth_mixed_diagonal, synth_mixed_fallback, FallbackResult,
-    MixedDiagonalResult, MixedFallbackResult, MixedFallbackSide,
+    MixedDiagonalResult, MixedFallbackSide, ProtocolResult,
 };
 use rsgridsynth::unitary::DOmegaUnitary;
 
@@ -604,7 +604,7 @@ fn main() {
             }
 
             match synth_mixed_fallback(theta_f64, eps, q.clone(), seed, false) {
-                Some(MixedFallbackResult::Exact { gates, .. }) => {
+                Some(ProtocolResult::Exact { gates, .. }) => {
                     let theta = to_fbig(theta_f64);
                     let eps_fb = to_fbig(eps);
                     let m = matrix_from_gates(&gates);
@@ -617,7 +617,10 @@ fn main() {
                         dd <= eps_fb
                     );
                 }
-                Some(MixedFallbackResult::Mixed { lo, hi, p, .. }) => {
+                Some(ProtocolResult::MixedDiagonal(_)) => unreachable!(
+                    "synth_mixed_fallback never produces MixedDiagonal -- only synth_rotation does"
+                ),
+                Some(ProtocolResult::Mixed { lo, hi, p, .. }) => {
                     let theta = to_fbig(theta_f64);
                     let eps_fb = to_fbig(eps);
                     let lo_v = matrix_from_gates(&lo.projective_gates);
