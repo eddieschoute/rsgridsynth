@@ -21,6 +21,6 @@ pub use mixed_diagonal::{
 
 pub use fallback::{exact_q, synth_fallback, FallbackResult, SectorRegion};
 
-pub use mixed_fallback::{synth_mixed_fallback, MixedFallbackResult, MixedFallbackSide};
+pub use mixed_fallback::{synth_mixed_fallback, synth_rotation, MixedFallbackSide, ProtocolResult};
 
 pub use small_angle::{synth_small_angle, synth_small_angle_with_max_k, SmallAngleRegion};
